@@ -76,6 +76,19 @@ experts are never loaded, so inference *and* attestation cost O(k), not O(E).
 accuracy), attests one query, catches a tampered page, and shows expert
 capacity loaded per query falling to 0.1% at 1024 experts.
 
+### `rig/moe_transformer.py` — the two fused, running on-chain
+
+The deep transformer (piece above) with each FFN block replaced by a mixture of
+experts, trained *through the chain*. `scripts/run moe_transformer` runs the
+full loop: 6 miners train a 2-layer × 8-expert model to 1.0 accuracy via DiLoCo
+aggregation, it replays bit-exact, and then a **decode step** (advancing one
+token, KV-cache style) touches only top-k experts per layer — 4 of 16 here —
+loading just the backbone + those 4 expert pages, attested by Merkle proofs
+against the committed root (tampered pages and wrong roots rejected). Per-token
+serving cost is O(top_k), not O(E): at 1024 experts/layer a decode step loads
+0.2% of expert capacity. This is the concrete shape of serving a model far too
+large to hold in memory.
+
 ### `rig/storage.py` — persistence & fast-sync
 
 Blocks (delta bodies + periodic full checkpoints) persist to disk; a stopped

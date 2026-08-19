@@ -7,6 +7,7 @@
 #         scripts/run async_node     # async miners over real sockets
 #         scripts/run model2         # bigger multi-layer model through the chain
 #         scripts/run moe            # sparse MoE + page-attested inference
+#         scripts/run moe_transformer   # MoE fused into the deep transformer, on-chain
 #         scripts/run run_all        # the falsifier suite -> results/report.md
 #         scripts/run test           # the pytest suite
 set -euo pipefail

@@ -85,6 +85,26 @@ class Tensor:
         out._backward = _bw
         return out
 
+    def reshape(self, *shape):
+        old = self.data.shape
+        out = Tensor(self.data.reshape(*shape), (self,))
+
+        def _bw():
+            self._accum(out.grad.reshape(old))
+        out._backward = _bw
+        return out
+
+    def slice_last(self, start, end):
+        """Select columns [start:end] of the last axis; scatter grad back."""
+        out = Tensor(self.data[..., start:end], (self,))
+
+        def _bw():
+            g = np.zeros_like(self.data)
+            g[..., start:end] = out.grad
+            self._accum(g)
+        out._backward = _bw
+        return out
+
     def rms_norm(self, gain, eps=1e-5):
         """RMSNorm over the last axis: x / sqrt(mean(x^2)+eps) * gain."""
         x = self.data
