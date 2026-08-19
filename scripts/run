@@ -15,6 +15,7 @@
 #         scripts/run p2p            # gossip network (in-process sim)
 #         scripts/run gossip_net --demo  # async gossip over REAL sockets
 #         scripts/run economics      # write-price homeostat + stake/slash
+#         scripts/run da             # data-availability: erasure coding + sampling
 #         scripts/run beacon         # threshold-BLS unbiasable randomness beacon
 #         scripts/run test           # the pytest suite
 # pynacl gives fast Ed25519 (the rig falls back to a slow pure-Python reference

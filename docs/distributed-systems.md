@@ -10,8 +10,10 @@ What each part maps to:
 | Block headers, prev-hash linking | `Header` committing prev_hash + state root + txset root + work | `rig/blockchain.py` |
 | Independent full validation | `validate_block` from first principles vs parent state | `rig/blockchain.py` |
 | Longest/heaviest chain | `BlockTree` heaviest-valid-chain fork choice | `rig/blockchain.py` |
-| P2P gossip, mempool | `GossipNode` + `Network` (flood, mempool, orphan buffer, sync-on-heal) | `rig/p2p.py` |
+| P2P gossip, mempool | in-process sim `rig/p2p.py`; real async sockets `rig/gossip_net.py` | `rig/p2p.py`, `rig/gossip_net.py` |
 | Difficulty retarget | `WritePriceController` holding delta-admission rate at target | `rig/economics.py` |
+| Unbiasable randomness (drand) | Threshold-BLS beacon | `rig/beacon.py` |
+| Erasure-coded DA + sampling (Celestia) | Reed-Solomon over GF(256) + Merkle sampling | `rig/da.py` |
 | — (novel) | Stake ledger + slashing on provable faults | `rig/economics.py` |
 
 ## What is now real
@@ -41,9 +43,13 @@ What each part maps to:
   `rig/p2p.py` remains as the deterministic, fully-testable model of the same
   logic. Remaining productionization: NAT traversal, peer scoring/eviction, and
   DoS resistance beyond the write-price homeostat.
-- **The DA layer is modelled as gossip** — bodies travel with their tx. There is
-  no erasure coding or availability sampling yet (§3.3); withholding is caught
-  only because bodies are present to hash-check.
+- **The DA layer is now a real erasure-coded, sampled primitive** (`rig/da.py`):
+  Reed-Solomon over a self-contained GF(256) splits a body into n shards, any k
+  reconstruct; shards are Merkle-committed and availability-sampled, so a
+  withholding attack (fewer than k shards served) is unrecoverable AND detected
+  by a few random samples (100% at k-1 available). Remaining: dispersing shards
+  across peers over the network and wiring the DA root into block validation as
+  the tx's da_pointer (both mechanical given the primitive).
 - **The randomness beacon is now a real threshold-BLS (drand-style) beacon**
   (`rig/beacon.py`): unbiasable, unpredictable, verifiable (§7.4). Remaining gap:
   it uses a trusted-dealer Shamir setup; production needs distributed key
@@ -57,9 +63,12 @@ What each part maps to:
 
 ## Next, in rough priority
 
-1. An **unbiasable randomness beacon** (threshold VRF) — everything downstream
-   (shard assignment, committee sampling, eval draws) hangs off it.
-2. **Real async socket gossip** across machines (fold `rig/p2p.py` onto
-   `rig/protocol.py`), then run a coordinator-free network on Mac + chris-server.
-3. A real **data-availability layer** with erasure coding + sampling.
-4. **Leader election / proposer lottery** to replace round-robin.
+The three hard crypto/distributed-systems primitives are now real (beacon,
+async gossip, DA). What remains to make them a *system*:
+
+1. **Distributed key generation** for the beacon (remove the trusted dealer).
+2. **Wire the real beacon + DA into live block production** — beacon-driven
+   shard/committee selection on-chain, and DA-root da_pointers validated by
+   sampling before a block is accepted (both mechanical now the primitives exist).
+3. **Leader election / proposer lottery** to replace round-robin.
+4. Network hardening: NAT traversal, peer scoring/eviction, DoS resistance.
