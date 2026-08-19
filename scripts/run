@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run any rig module with numpy available, regardless of system python.
+# Usage:  scripts/run e2e        # the end-to-end toy chain
+#         scripts/run run_all    # the full falsifier suite
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mod="${1:-e2e}"
+
+if python3 -c "import numpy" 2>/dev/null; then
+  exec python3 -m "rig.${mod}"
+elif command -v uv >/dev/null 2>&1; then
+  exec uv run --with numpy python -m "rig.${mod}"
+else
+  echo "need numpy: pip install numpy   (or install uv)" >&2
+  exit 1
+fi
