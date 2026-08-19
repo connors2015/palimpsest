@@ -76,6 +76,15 @@ class MoETransformer:
             n = int(np.prod(shape))
             self._offsets[name] = (off, off + n, shape)
             off += n
+        # page layout: for each page, the ordered (name, size, shape) it packs,
+        # so a page array can be unpacked back into named params by a verifier
+        # that holds only some pages (§8 partial recompute).
+        self._page_layout = []
+        for pid, names in self._page_names():
+            entries = [(n, int(np.prod(self._offsets[n][2])), self._offsets[n][2])
+                       for n in names]
+            self._page_layout.append((pid, entries))
+        self._page_id_to_index = {pid: i for i, (pid, _) in enumerate(self._page_layout)}
 
     # -- (de)serialization -------------------------------------------------
     def init(self, rng) -> np.ndarray:
@@ -242,39 +251,113 @@ class MoETransformer:
             x = x + self._moe_ffn(x, p, l, N)
         return used
 
-    def serve(self, vec, tokens, decode_step=True):
-        """Serve a query loading only the backbone + the experts it routes to.
+    def serve(self, vec, tokens):
+        """Serve a query, loading only the backbone + the experts it routes to.
 
-        By default measures a decode step (the last position) — the per-token
-        cost that dominates autoregressive serving. `decode_step=False` reports
-        the whole-sequence union instead.
+        The receipt's loaded pages are the whole-sequence union of experts —
+        exactly what a verifier needs to recompute the full output from only
+        those pages (verify_serve). We also report the per-token *decode-step*
+        cost (top-k experts per layer) as the incremental serving cost.
         """
         B, T = tokens.shape
-        positions = [b * T + (T - 1) for b in range(B)] if decode_step else None
-        used = self.experts_used(vec, tokens, positions)
-        page_index = {pid: i for i, (pid, _) in enumerate(self._page_names())}
-        loaded = [0] + sorted(page_index[u] for u in used)
+        union = self.experts_used(vec, tokens, positions=None)
+        decode = self.experts_used(vec, tokens,
+                                   positions=[b * T + (T - 1) for b in range(B)])
+        loaded = [0] + sorted(self._page_id_to_index[u] for u in union)
         levels = merkle.build([p.tobytes() for p in self.pages(vec)])
         proofs = {i: merkle.proof(levels, i) for i in loaded}
         total_experts = self.cfg.n_layers * self.cfg.n_experts
-        return dict(output=self.infer(vec, tokens), used_experts=sorted(used),
-                    root=levels[-1][0], proofs=proofs, loaded_pages=loaded,
-                    decode_step=decode_step, expert_fraction=len(used) / total_experts)
+        return dict(output=self.infer(vec, tokens), used_experts=sorted(union),
+                    decode_experts=sorted(decode), root=levels[-1][0],
+                    proofs=proofs, loaded_pages=loaded,
+                    union_fraction=len(union) / total_experts,
+                    decode_fraction=len(decode) / total_experts)
+
+    # -- numpy-only partial recompute for verification (§8) ----------------
+    def _params_from_pages(self, available: dict) -> dict:
+        """Reconstruct named params from only the pages a verifier holds."""
+        params = {}
+        for idx, (pid, entries) in enumerate(self._page_layout):
+            if idx not in available:
+                continue
+            page, off = available[idx], 0
+            for name, size, shape in entries:
+                params[name] = page[off:off + size].reshape(shape)
+                off += size
+        return params
+
+    def _sparse_forward_np(self, params, tokens, available_experts):
+        """Recompute logits in numpy using ONLY the experts in `available_experts`.
+
+        Any expert a token routes to that is not available raises KeyError —
+        i.e., the server under-loaded and the receipt is invalid. Un-routed
+        experts (gate 0) are never touched, so the whole model is never loaded.
+        """
+        cfg = self.cfg
+        B, T = tokens.shape
+        N, D, H = B * T, cfg.d_model, cfg.n_heads
+        dh = D // H
+        x = params["tok_emb"][tokens] + params["pos_emb"][None, :T, :]
+        for l in range(cfg.n_layers):
+            h = _rms(x, params[f"ln1_{l}"])
+            q = _split(h @ params[f"Wq_{l}"], B, T, H, dh)
+            k = _split(h @ params[f"Wk_{l}"], B, T, H, dh)
+            v = _split(h @ params[f"Wv_{l}"], B, T, H, dh)
+            sc = np.einsum("bhtd,bhsd->bhts", q, k) / np.sqrt(dh)
+            sc = np.where(self._causal[:T, :T][None, None], sc, -1e30)
+            ctx = np.einsum("bhts,bhsd->bhtd", _softmax(sc, -1), v)
+            x = x + _merge(ctx, B, T, D) @ params[f"Wo_{l}"]
+            hff = _rms(x, params[f"ln2_{l}"]).reshape(N, D)
+            gate, mask = self._route(hff, params[f"router_{l}"])
+            moe = np.zeros((N, D))
+            for e in np.unique(np.where(mask)[1]):
+                if (l, int(e)) not in available_experts:
+                    raise KeyError((l, int(e)))          # server under-loaded
+                W1, b1 = params[f"e{e}_W1_{l}"], params[f"e{e}_b1_{l}"]
+                W2, b2 = params[f"e{e}_W2_{l}"], params[f"e{e}_b2_{l}"]
+                oe = np.maximum(hff @ W1 + b1, 0.0) @ W2 + b2
+                moe += gate[:, e:e + 1] * oe
+            x = x + moe.reshape(B, T, D)
+        x = _rms(x, params["lnf"])
+        return (x @ params["Wout"] + params["bout"]).argmax(-1)
+
+
+def _rms(x, gain, eps=1e-5):
+    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + eps) * gain
+
+
+def _split(t, B, T, H, dh):
+    return t.reshape(B, T, H, dh).transpose(0, 2, 1, 3)
+
+
+def _merge(t, B, T, D):
+    return t.transpose(0, 2, 1, 3).reshape(B, T, D)
 
 
 def verify_serve(model, available_pages, receipt, committed_root, tokens):
-    """Check the proofs for loaded pages, then recompute output from them only."""
+    """A true partial-recompute verifier (§8): holds only the receipt's pages.
+
+    (1) Every loaded page's Merkle proof must check against the committed root.
+    (2) Recompute the full output from ONLY those pages. Routing comes from the
+        backbone; if a token routes to an expert whose page was not loaded, the
+        server under-loaded and the receipt is rejected. Un-routed experts are
+        never materialized, so the whole model is never loaded to verify.
+    (3) The recomputed output must equal the receipt's output.
+    """
     for i in receipt["loaded_pages"]:
         if i not in available_pages:
             return False
         if not merkle.verify(available_pages[i].tobytes(), i,
                              receipt["proofs"][i], committed_root):
             return False
-    # The gated forward zeroes un-selected experts, so a full recompute (which a
-    # verifier could do from the loaded pages by treating absent experts as
-    # gated-out) reproduces the output. Here we confirm the receipt's output is
-    # self-consistent with the committed weights the proofs cover.
-    return receipt["output"] is not None
+    params = model._params_from_pages(available_pages)
+    available_experts = {pid for i, (pid, _) in enumerate(model._page_layout)
+                         if i in available_pages and pid != "backbone"}
+    try:
+        recomputed = model._sparse_forward_np(params, tokens, available_experts)
+    except KeyError:
+        return False                                 # routed to an unloaded expert
+    return bool(np.array_equal(recomputed, receipt["output"]))
 
 
 if __name__ == "__main__":
@@ -300,25 +383,37 @@ if __name__ == "__main__":
 
     vec = dequantize(chain.w_int)
     tokens = model.sample_batch(np.random.default_rng(1), 1)[0]
-    r = model.serve(vec, tokens, decode_step=True)
+    r = model.serve(vec, tokens)
     root = model.merkle_root(vec)
     pages = {i: model.pages(vec)[i] for i in r["loaded_pages"]}
-    ok = verify_serve(model, pages, r, root, tokens)
+
+    # the verifier holds ONLY the receipt's pages and recomputes from them
+    honest = verify_serve(model, pages, r, root, tokens)
     tampered = dict(pages)
     tampered[r["loaded_pages"][-1]] = tampered[r["loaded_pages"][-1]] + 1.0
-    fraud = verify_serve(model, tampered, r, root, tokens)
-    print(f"\nattested sparse decode step (one generated token):")
-    print(f"  experts touched:  {len(r['used_experts'])} of {total_experts} "
-          f"(<= top_k x n_layers = {cfg.top_k * cfg.n_layers})")
-    print(f"  pages loaded:     backbone + {len(r['loaded_pages']) - 1} of "
-          f"{total_experts} expert pages")
-    print(f"  Merkle-verify (honest):    {ok}")
-    print(f"  Merkle-verify (tampered):  {fraud}")
+    tamper_ok = verify_serve(model, tampered, r, root, tokens)
+    under = {i: pages[i] for i in r["loaded_pages"][:-1]}
+    r_under = dict(r, loaded_pages=r["loaded_pages"][:-1])
+    underload_ok = verify_serve(model, under, r_under, root, tokens)
+    forged = dict(r, output=(r["output"] + 1) % cfg.vocab)
+    forged_ok = verify_serve(model, pages, forged, root, tokens)
 
-    print("\nexpert capacity per decode step as experts multiply (top-2, 2 layers):")
+    print(f"\npartial-recompute attestation (verifier holds only loaded pages):")
+    print(f"  pages loaded to verify:  backbone + {len(r['loaded_pages']) - 1} of "
+          f"{total_experts} expert pages (sequence union)")
+    print(f"  incremental decode step: {len(r['decode_experts'])} experts "
+          f"(<= top_k x n_layers = {cfg.top_k * cfg.n_layers})")
+    print(f"  verify honest:           {honest}")
+    print(f"  verify tampered page:    {tamper_ok}")
+    print(f"  verify under-loaded:     {underload_ok}")
+    print(f"  verify forged output:    {forged_ok}")
+
+    print("\nper-decode-step expert capacity as experts multiply (top-2, 2 layers):")
     for E in (8, 32, 128, 1024):
         print(f"  E={E:>4}/layer: <= {100 * cfg.top_k / E:5.2f}% of experts per layer "
               f"— decode cost is O(top_k), not O(E)")
     print(f"\nwall time: {time.time() - t0:.1f}s")
     print("=" * 70)
-    raise SystemExit(0 if log.acc[-1] > 0.75 and ok and not fraud else 1)
+    ok = (log.acc[-1] > 0.75 and honest
+          and not tamper_ok and not underload_ok and not forged_ok)
+    raise SystemExit(0 if ok else 1)

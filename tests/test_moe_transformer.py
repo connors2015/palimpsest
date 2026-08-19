@@ -50,37 +50,57 @@ def test_decode_step_is_sparse():
     m = MoETransformer(SMALL)
     vec = m.init(np.random.default_rng(2))
     tokens = m.sample_batch(np.random.default_rng(3), 1)[0]
-    r = m.serve(vec, tokens, decode_step=True)
-    # one generated token touches at most top_k experts per layer
-    assert len(r["used_experts"]) <= SMALL.top_k * SMALL.n_layers
-    # loaded pages = backbone + exactly the used experts
+    r = m.serve(vec, tokens)
+    # one generated token routes to at most top_k experts per layer
+    assert len(r["decode_experts"]) <= SMALL.top_k * SMALL.n_layers
+    # the receipt loads the sequence union (needed to recompute the full output)
     assert r["loaded_pages"][0] == 0
     assert len(r["loaded_pages"]) == 1 + len(r["used_experts"])
+    assert len(r["decode_experts"]) <= len(r["used_experts"])
 
 
-def test_decode_step_sparser_than_full_sequence():
-    m = MoETransformer(MoETConfig(n_experts=8, top_k=2, n_layers=2))
-    vec = m.init(np.random.default_rng(4))
-    tokens = m.sample_batch(np.random.default_rng(5), 1)[0]
-    decode = m.serve(vec, tokens, decode_step=True)
-    whole = m.serve(vec, tokens, decode_step=False)
-    assert len(decode["used_experts"]) <= len(whole["used_experts"])
-    assert len(decode["used_experts"]) <= m.cfg.top_k * m.cfg.n_layers
-
-
-def test_attestation_honest_and_tampered():
+def test_partial_recompute_verifier_honest():
     m = MoETransformer(SMALL)
     vec = m.init(np.random.default_rng(6))
     tokens = m.sample_batch(np.random.default_rng(7), 1)[0]
-    r = m.serve(vec, tokens, decode_step=True)
+    r = m.serve(vec, tokens)
     root = m.merkle_root(vec)
     pages = {i: m.pages(vec)[i] for i in r["loaded_pages"]}
-    assert verify_serve(m, pages, r, root, tokens)                 # honest
-    bad = dict(pages)
-    last = r["loaded_pages"][-1]
-    bad[last] = bad[last] + 1.0
-    assert not verify_serve(m, bad, r, root, tokens)               # tampered page
+    # verifier holds ONLY the loaded pages (never the whole model)
+    assert len(pages) < len(m.pages(vec)) or m.cfg.n_experts * m.cfg.n_layers <= len(r["used_experts"])
+    assert verify_serve(m, pages, r, root, tokens)
+
+
+def test_partial_recompute_rejects_tamper_underload_forgery_wrongroot():
+    m = MoETransformer(SMALL)
+    vec = m.init(np.random.default_rng(6))
+    tokens = m.sample_batch(np.random.default_rng(7), 1)[0]
+    r = m.serve(vec, tokens)
+    root = m.merkle_root(vec)
+    pages = {i: m.pages(vec)[i] for i in r["loaded_pages"]}
+
+    tampered = dict(pages)
+    tampered[r["loaded_pages"][-1]] = tampered[r["loaded_pages"][-1]] + 1.0
+    assert not verify_serve(m, tampered, r, root, tokens)          # tampered page
+
     assert not verify_serve(m, pages, r, m.merkle_root(vec + 1.0), tokens)  # wrong root
+
+    forged = dict(r, output=(r["output"] + 1) % m.cfg.vocab)
+    assert not verify_serve(m, pages, forged, root, tokens)        # forged output
+
+    if len(r["loaded_pages"]) > 2:                                 # under-load
+        under = {i: pages[i] for i in r["loaded_pages"][:-1]}
+        r_under = dict(r, loaded_pages=r["loaded_pages"][:-1])
+        assert not verify_serve(m, under, r_under, root, tokens)
+
+
+def test_fused_model_trains_through_async():
+    from rig.async_node import run_async_sim
+    m = MoETransformer(SMALL)
+    chain, log = run_async_sim(ticks=200, seed=7, model=m)
+    assert log.acc[-1] > log.acc[0] + 0.4        # trains under asynchrony
+    assert state_root(chain.replay()) == chain.blocks[-1].root
+    assert log.stale_dropped > 0                  # genuinely async, not barriered
 
 
 def test_merkle_root_deterministic():

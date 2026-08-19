@@ -263,7 +263,13 @@ def _print_async(chain, log, label):
 
 if __name__ == "__main__":
     import sys
-    if "--sim" in sys.argv:
+    if "--moe" in sys.argv:
+        # the fused MoE transformer, trained through the async path
+        from .moe_transformer import MoETConfig, MoETransformer
+        model = MoETransformer(MoETConfig(n_experts=4, top_k=2))
+        chain, log = run_async_sim(ticks=200, seed=7, model=model)
+        _print_async(chain, log, "MoE transformer, async simulator")
+    elif "--sim" in sys.argv:
         chain, log = run_async_sim()
         _print_async(chain, log, "deterministic simulator")
     else:

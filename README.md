@@ -79,15 +79,22 @@ capacity loaded per query falling to 0.1% at 1024 experts.
 ### `rig/moe_transformer.py` — the two fused, running on-chain
 
 The deep transformer (piece above) with each FFN block replaced by a mixture of
-experts, trained *through the chain*. `scripts/run moe_transformer` runs the
-full loop: 6 miners train a 2-layer × 8-expert model to 1.0 accuracy via DiLoCo
-aggregation, it replays bit-exact, and then a **decode step** (advancing one
-token, KV-cache style) touches only top-k experts per layer — 4 of 16 here —
-loading just the backbone + those 4 expert pages, attested by Merkle proofs
-against the committed root (tampered pages and wrong roots rejected). Per-token
-serving cost is O(top_k), not O(E): at 1024 experts/layer a decode step loads
-0.2% of expert capacity. This is the concrete shape of serving a model far too
-large to hold in memory.
+experts, trained *through the chain* — synchronously (`scripts/run
+moe_transformer`) and through the **async path with real staleness**
+(`scripts/run async_node --moe`), both reaching 1.0 and replaying bit-exact.
+
+Serving is attested by a **true partial-recompute verifier**: the receipt names
+the pages the query used (backbone + the sequence's expert union), and the
+verifier — holding *only those pages* — checks their Merkle proofs against the
+committed root and then recomputes the whole output from them. Routing comes
+from the backbone, so if a token routes to an expert whose page wasn't loaded,
+the receipt is rejected (the server under-loaded); un-routed experts are never
+materialized, so the whole model is never loaded to verify. Tampered pages,
+wrong roots, under-loading, and forged outputs all fail. The incremental
+per-token cost — a **decode step** — routes to only top-k experts per layer, so
+per-token serving is O(top_k), not O(E): 0.2% of expert capacity at 1024
+experts/layer. This is the concrete shape of serving a model far too large to
+hold in memory.
 
 ### `rig/storage.py` — persistence & fast-sync
 
