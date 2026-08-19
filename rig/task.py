@@ -23,3 +23,20 @@ def make_batch(rng: np.random.Generator, batch: int,
     mask = np.zeros((batch, context), dtype=bool)
     mask[:, lag:] = True
     return tokens, targets, mask
+
+
+def make_batch_modadd(rng: np.random.Generator, batch: int,
+                      vocab: int = VOCAB, context: int = CONTEXT, **_):
+    """Harder task: target[t] = (tokens[t] + tokens[t-1]) mod vocab, t >= 1.
+
+    A nonlinear function of two positions — a bigram/lookup can't solve it, so
+    it needs attention over two tokens plus a combine, exercising the deeper
+    model's capacity in a way delayed-copy does not.
+    """
+    tokens = rng.integers(0, vocab, size=(batch, context))
+    targets = np.empty_like(tokens)
+    targets[:, 1:] = (tokens[:, 1:] + tokens[:, :context - 1]) % vocab
+    targets[:, 0] = tokens[:, 0]
+    mask = np.zeros((batch, context), dtype=bool)
+    mask[:, 1:] = True
+    return tokens, targets, mask

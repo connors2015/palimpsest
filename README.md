@@ -41,6 +41,27 @@ DiLoCo outer-sync barrier). The socket run and the in-memory run produce the
 **byte-identical chain**, so real multiprocess consensus stays fully
 reproducible.
 
+### `rig/async_node.py` — asynchronous miners with staleness
+
+The synchronous barrier dropped. Heterogeneous fast/slow miners submit whenever
+they finish; a delta computed against block N may not be scored until the head
+is at N+lag. Staleness is handled per §4.1 — stale deltas are scored against the
+*current* head (included only if still helpful), reward decays with lag, and
+deltas older than `GRACE_G` are dropped. `--sim` runs a fully-seeded,
+reproducible event-driven simulator; without it, real miner processes run over
+sockets against a threaded, wall-clock coordinator. The model still trains to
+100% under asynchrony, and fast miners out-earn slow ones as staleness discounts
+late work.
+
+### `rig/model2.py` + `rig/autograd.py` — a bigger model
+
+A minimal reverse-mode autograd engine (`autograd.py`, gradient-checked op by
+op) carries a configurable multi-layer, multi-head transformer with RMSNorm
+(`model2.py`, ~68k params by default). `scripts/run model2` trains it through
+the chain's DiLoCo aggregation (0.12 → 0.93 on an in-context modular-addition
+task), replaying bit-exact. All rig components take the same `Model` interface,
+so the chain runs either model unchanged.
+
 ### `rig/storage.py` — persistence & fast-sync
 
 Blocks (delta bodies + periodic full checkpoints) persist to disk; a stopped
