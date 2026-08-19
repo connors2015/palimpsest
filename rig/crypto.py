@@ -13,6 +13,15 @@ from dataclasses import dataclass, field
 
 from . import ed25519
 
+# Prefer libsodium (pynacl) — same Ed25519, ~1000x faster than the pure-Python
+# reference, which matters once a gossip network verifies thousands of sigs.
+# Falls back to the self-contained reference when pynacl isn't installed.
+try:
+    from nacl.signing import SigningKey, VerifyKey     # type: ignore
+    _HAVE_NACL = True
+except Exception:
+    _HAVE_NACL = False
+
 
 @dataclass
 class Key:
@@ -29,14 +38,23 @@ class Key:
         sk = seed if seed is not None else os.urandom(32)
         if len(sk) != 32:
             sk = hashlib.sha256(sk).digest()
-        return Key(sk=sk, pk=ed25519.publickey(sk))
+        if _HAVE_NACL:
+            pk = bytes(SigningKey(sk).verify_key)
+        else:
+            pk = ed25519.publickey(sk)
+        return Key(sk=sk, pk=pk)
 
     def sign(self, msg: bytes) -> bytes:
+        if _HAVE_NACL:
+            return SigningKey(self.sk).sign(msg).signature
         return ed25519.signature(msg, self.sk, self.pk)
 
 
 def verify(pub_hex: str, msg: bytes, sig: bytes) -> bool:
     try:
+        if _HAVE_NACL:
+            VerifyKey(bytes.fromhex(pub_hex)).verify(msg, sig)
+            return True
         return ed25519.checkvalid(sig, msg, bytes.fromhex(pub_hex))
     except Exception:
         return False

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run a rig module (or the test suite) with numpy available, regardless of
-# the system python.
+# Run a rig module (or the test suite) with numpy (+pynacl) available, regardless
+# of the system python.
 # Usage:  scripts/run e2e            # the end-to-end toy chain (transformer)
 #         scripts/run node           # multiprocess miners over sockets
 #         scripts/run async_node --sim   # async miners with staleness (sim)
@@ -12,29 +12,33 @@
 #         scripts/run redteam_report # the §12.3 stealthy-backdoor red-team
 #         scripts/run observe        # instrumented convergence run (live dashboard)
 #         scripts/run observe --big  # push model size up (~1M params)
+#         scripts/run p2p            # gossip network: consensus without a coordinator
 #         scripts/run test           # the pytest suite
+# pynacl gives fast Ed25519 (the rig falls back to a slow pure-Python reference
+# without it), so it is requested for uv runs; system-python runs use whatever
+# crypto backend is importable.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 target="${1:-e2e}"
 
-have_numpy() { python3 -c "import numpy" 2>/dev/null; }
+have() { python3 -c "import $1" 2>/dev/null; }
 
 if [ "$target" = "test" ]; then
-  if have_numpy && python3 -c "import pytest" 2>/dev/null; then
+  if have numpy && have pytest; then
     exec python3 -m pytest -q
   elif command -v uv >/dev/null 2>&1; then
-    exec uv run --with numpy --with pytest python -m pytest -q
+    exec uv run --with numpy --with pytest --with pynacl python -m pytest -q
   else
-    echo "need numpy+pytest: pip install numpy pytest   (or install uv)" >&2
+    echo "need numpy+pytest: pip install numpy pytest pynacl   (or install uv)" >&2
     exit 1
   fi
 fi
 
-if have_numpy; then
+if have numpy; then
   exec python3 -m "rig.${target}" "${@:2}"
 elif command -v uv >/dev/null 2>&1; then
-  exec uv run --with numpy python -m "rig.${target}" "${@:2}"
+  exec uv run --with numpy --with pynacl python -m "rig.${target}" "${@:2}"
 else
-  echo "need numpy: pip install numpy   (or install uv)" >&2
+  echo "need numpy: pip install numpy pynacl   (or install uv)" >&2
   exit 1
 fi
