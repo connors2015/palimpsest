@@ -350,7 +350,7 @@
         <em>stop citing, start seeing.</em></p>
 
       <div class="metrics">
-        <div class="metric"><div class="n tnum">65</div><p class="l">automated tests passing across every component</p></div>
+        <div class="metric"><div class="n tnum">69</div><p class="l">automated tests passing across every component</p></div>
         <div class="metric"><div class="n tnum">0.13<small>&rarr;</small>1.00</div><p class="l">on-chain model accuracy through decentralized training</p></div>
         <div class="metric"><div class="n tnum">0.2<small>%</small></div><p class="l">of expert capacity loaded per token at 1,024 experts</p></div>
         <div class="metric"><div class="n">bit-exact</div><p class="l">replay of the model from genesis, every run</p></div>
@@ -387,7 +387,7 @@
       <h2 class="sec-h">From rig to network.</h2>
       <div class="phases">
         <div class="phase"><span class="pk">Phase 0</span><div><h3>The rig</h3><p>Reference implementation; every falsifier we could test at toy scale, tested.</p></div><span class="pill done">Done</span></div>
-        <div class="phase"><span class="pk">Phase 0.5</span><div><h3>Adversarial hardening</h3><p>Red-team the one bet the security story rests on: stealthy data poisoning versus the detection locks.</p></div><span class="pill next">In progress</span></div>
+        <div class="phase"><span class="pk">Phase 0.5</span><div><h3>Adversarial hardening</h3><p>Red-teamed the bet the security story rested on. It found blind detection insufficient — so we corrected the claim to reversibility, and proved excision recovers.</p></div><span class="pill done">Done</span></div>
         <div class="phase"><span class="pk">Phase 1</span><div><h3>Devnet at real scale</h3><p>A 7B model on real infrastructure and a real data-availability layer; a named vertical with community-owned data.</p></div><span class="pill later">Next</span></div>
         <div class="phase"><span class="pk">Phase 2</span><div><h3>Incentivized testnet</h3><p>The chosen community aboard; first external paying inference on the attested tier.</p></div><span class="pill later">Later</span></div>
         <div class="phase"><span class="pk">Phase 3</span><div><h3>Mainnet &amp; the crossover</h3><p>The single public goal — the first block where inference revenue exceeds training issuance.</p></div><span class="pill later">Later</span></div>
@@ -400,7 +400,7 @@
       <p class="prose">The founding memo's doctrine is a first-principles limits
         section written by us before a reviewer writes it for us.</p>
       <div class="risks">
-        <div class="risk"><p class="rk">Detection</p><p>The security model assumes probes catch poisoning that also improves loss. If a stealthy backdoor beats them cheaply, the story weakens. <strong>This is what we test next.</strong></p></div>
+        <div class="risk"><p class="rk">Detection</p><p>Our own red-team confirmed blind probes can't catch a stealthy, attacker-triggered backdoor — so we don't claim they do. The guarantee we hold is <strong>reversibility</strong>: a discovered backdoor is excised from the chain, driven to zero effect. Prevention is raising the cost of getting poison admitted, not detecting it after.</p></div>
         <div class="risk"><p class="rk">Scale</p><p>Everything proven so far is toy scale. The 2–3&times; compute handicap and convergence at billions of parameters are real, and only a funded devnet answers them.</p></div>
         <div class="risk"><p class="rk">Demand</p><p>The bootstrap economics close under modeled demand. A vertical clearing the revenue threshold must be found and signed, not assumed.</p></div>
         <div class="risk"><p class="rk">Reflexivity</p><p>The supply-side moat runs on token value; the durable moats are attestation, freshness, and provenance — the ones that survive a bear.</p></div>
