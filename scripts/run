@@ -12,7 +12,8 @@
 #         scripts/run redteam_report # the §12.3 stealthy-backdoor red-team
 #         scripts/run observe        # instrumented convergence run (live dashboard)
 #         scripts/run observe --big  # push model size up (~1M params)
-#         scripts/run p2p            # gossip network: consensus without a coordinator
+#         scripts/run p2p            # gossip network (in-process sim)
+#         scripts/run gossip_net --demo  # async gossip over REAL sockets
 #         scripts/run economics      # write-price homeostat + stake/slash
 #         scripts/run beacon         # threshold-BLS unbiasable randomness beacon
 #         scripts/run test           # the pytest suite

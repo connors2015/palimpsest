@@ -35,16 +35,20 @@ What each part maps to:
 
 ## What is still faked or simplified (honest scope)
 
-- **Gossip is an in-process deterministic simulator**, not yet async sockets
-  across machines. It exists in this form so the consensus properties are
-  testable; wiring it onto `rig/protocol.py` for real cross-machine gossip is a
-  mechanical next step (the LAN coordinator already proves the sockets work).
+- **Gossip now runs over real async sockets** (`rig/gossip_net.py`) — verified
+  coordinator-free across machines (2 nodes on the Mac + 1 on chris-server over
+  Tailscale all converged to the identical head at height 32). The in-process
+  `rig/p2p.py` remains as the deterministic, fully-testable model of the same
+  logic. Remaining productionization: NAT traversal, peer scoring/eviction, and
+  DoS resistance beyond the write-price homeostat.
 - **The DA layer is modelled as gossip** — bodies travel with their tx. There is
   no erasure coding or availability sampling yet (§3.3); withholding is caught
   only because bodies are present to hash-check.
-- **The randomness beacon is `sha256(height)`** — deterministic and predictable,
-  not the unbiasable VRF/threshold beacon §7.4 requires (this is the root of the
-  security tree and the most important remaining crypto gap).
+- **The randomness beacon is now a real threshold-BLS (drand-style) beacon**
+  (`rig/beacon.py`): unbiasable, unpredictable, verifiable (§7.4). Remaining gap:
+  it uses a trusted-dealer Shamir setup; production needs distributed key
+  generation so no party ever holds the group secret, and it must be wired into
+  live block production (currently proven standalone).
 - **Block production is round-robin / designated proposers**, not a real
   leader-election or PoW/PoS lottery; fork choice is real but proposer selection
   is a stand-in.
