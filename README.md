@@ -62,6 +62,20 @@ the chain's DiLoCo aggregation (0.12 → 0.93 on an in-context modular-addition
 task), replaying bit-exact. All rig components take the same `Model` interface,
 so the chain runs either model unchanged.
 
+### `rig/moe.py` + `rig/merkle.py` — sparse inference without loading the model
+
+The path toward a very large model: most parameters live in **experts**, and
+each query routes to only top-k of them, so serving never loads the whole
+model. The chain commits a Merkle root over the weight pages (one per expert,
+`rig/merkle.py`); a serving node answers a query by loading only the router +
+the k selected expert pages, and returns a receipt with **Merkle inclusion
+proofs for exactly those pages**. A verifier checks the proofs against the
+committed root and recomputes the output touching only those pages — the other
+experts are never loaded, so inference *and* attestation cost O(k), not O(E).
+`scripts/run moe` trains an 8-expert model (sparse top-1 serving matches dense
+accuracy), attests one query, catches a tampered page, and shows expert
+capacity loaded per query falling to 0.1% at 1024 experts.
+
 ### `rig/storage.py` — persistence & fast-sync
 
 Blocks (delta bodies + periodic full checkpoints) persist to disk; a stopped
