@@ -10,6 +10,8 @@
 #         scripts/run moe_transformer   # MoE fused into the deep transformer, on-chain
 #         scripts/run run_all        # the falsifier suite -> results/report.md
 #         scripts/run redteam_report # the §12.3 stealthy-backdoor red-team
+#         scripts/run observe        # instrumented convergence run (live dashboard)
+#         scripts/run observe --big  # push model size up (~1M params)
 #         scripts/run test           # the pytest suite
 set -euo pipefail
 cd "$(dirname "$0")/.."
