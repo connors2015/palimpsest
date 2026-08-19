@@ -16,6 +16,8 @@
 #         scripts/run gossip_net --demo  # async gossip over REAL sockets
 #         scripts/run economics      # write-price homeostat + stake/slash
 #         scripts/run da             # data-availability: erasure coding + sampling
+#         scripts/run dkg            # distributed key generation (no trusted dealer)
+#         scripts/run integrated     # beacon + DA + leader election, one live loop
 #         scripts/run beacon         # threshold-BLS unbiasable randomness beacon
 #         scripts/run test           # the pytest suite
 # pynacl gives fast Ed25519 (the rig falls back to a slow pure-Python reference
