@@ -1,0 +1,273 @@
+<title>Palimpsest — technical brief</title>
+<style>
+  :root{
+    --ground:#e7e6df; --surface:#efeee8; --surface2:#f5f4ef;
+    --ink:#1b1e24; --soft:#565b64; --faint:#878b93; --line:#d0cdc3; --line2:#dddacf;
+    --gold:#8f5f18; --goldink:#754d12; --teal:#2f7d6b; --warn:#9c5326;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --shadow:0 1px 0 rgba(27,30,36,.04),0 10px 34px -20px rgba(27,30,36,.26);
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --ground:#101319; --surface:#161b23; --surface2:#1c222b;
+    --ink:#e7e9ee; --soft:#99a0ac; --faint:#5f6773; --line:#262c37; --line2:#1f2530;
+    --gold:#dca85a; --goldink:#e7bd77; --teal:#62b9a6; --warn:#d68a5a;
+    --shadow:0 1px 0 rgba(0,0,0,.3),0 22px 54px -30px rgba(0,0,0,.7);
+  }}
+  :root[data-theme="dark"]{
+    --ground:#101319; --surface:#161b23; --surface2:#1c222b;
+    --ink:#e7e9ee; --soft:#99a0ac; --faint:#5f6773; --line:#262c37; --line2:#1f2530;
+    --gold:#dca85a; --goldink:#e7bd77; --teal:#62b9a6; --warn:#d68a5a;
+    --shadow:0 1px 0 rgba(0,0,0,.3),0 22px 54px -30px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--serif);
+    font-size:17px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:820px;margin:0 auto;padding:0 26px}
+  .mono{font-family:var(--mono)}
+  code{font-family:var(--mono);font-size:.85em;background:var(--surface2);
+    border:1px solid var(--line2);border-radius:4px;padding:1px 5px}
+  a{color:var(--goldink)}
+  h1,h2,h3{line-height:1.15;text-wrap:balance;font-weight:600}
+  .eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--faint);margin:0}
+  /* masthead */
+  header{border-bottom:1px solid var(--line);background:var(--surface)}
+  .mast{display:flex;align-items:baseline;gap:14px;height:56px}
+  .brand{font-family:var(--mono);font-weight:600;letter-spacing:.14em;
+    text-transform:uppercase;font-size:14px}
+  .tag{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--faint);border:1px solid var(--line);border-radius:100px;padding:3px 9px}
+  .spacer{flex:1}
+  .toggle{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    background:transparent;border:1px solid var(--line);color:var(--soft);border-radius:100px;
+    padding:5px 11px;cursor:pointer}.toggle:hover{border-color:var(--gold);color:var(--ink)}
+  /* title block */
+  .title{padding:56px 0 30px;border-bottom:1px solid var(--line)}
+  .title h1{font-size:clamp(34px,6vw,52px);letter-spacing:-.02em;margin:12px 0 14px}
+  .title .lede{color:var(--soft);font-size:19px;max-width:60ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:22px;font-family:var(--mono);
+    font-size:12px;color:var(--faint)}
+  .meta b{color:var(--ink);font-weight:600}
+  section{padding:38px 0;border-bottom:1px solid var(--line2)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
+    color:var(--goldink);margin:0 0 18px}
+  h3{font-size:20px;margin:26px 0 10px}
+  p{margin:0 0 16px}
+  ul{margin:0 0 16px;padding-left:20px} li{margin:6px 0}
+  strong{font-weight:600}
+  .callout{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--gold);
+    border-radius:8px;padding:16px 20px;margin:20px 0;box-shadow:var(--shadow)}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout p{margin:0} .callout .lab{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--faint);margin:0 0 6px}
+  /* tables */
+  .tbl{overflow-x:auto;margin:18px 0;border:1px solid var(--line);border-radius:10px}
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line2);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--soft);background:var(--surface2)}
+  tr:last-child td{border-bottom:none}
+  td .mono{font-size:12.5px;color:var(--soft)}
+  .ok{color:var(--teal);font-family:var(--mono);font-size:12px}
+  .part{color:var(--gold);font-family:var(--mono);font-size:12px}
+  /* stack diagram */
+  .stack{display:grid;gap:8px;margin:18px 0}
+  .layer{background:var(--surface);border:1px solid var(--line);border-radius:9px;
+    padding:13px 16px;display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:baseline}
+  .layer .n{font-family:var(--mono);font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--goldink)}
+  .layer .d{color:var(--soft);font-size:14.5px}
+  .layer .d b{color:var(--ink)}
+  /* stat row */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:8px 0 4px}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .stat .v{font-family:var(--mono);font-size:24px;font-weight:600;color:var(--ink)}
+  .stat .l{font-size:12.5px;color:var(--soft);margin-top:6px;line-height:1.35}
+  footer{padding:34px 0 64px;color:var(--faint);font-family:var(--mono);font-size:11.5px}
+  footer .d{max-width:64ch;line-height:1.6;margin-top:8px}
+  @media(max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}
+    .layer{grid-template-columns:1fr;gap:4px}}
+</style>
+
+<header><div class="wrap mast">
+  <span class="brand">Palimpsest</span><span class="tag">Technical brief · confidential</span>
+  <span class="spacer"></span><button class="toggle" id="tg">Theme</button>
+</div></header>
+
+<div class="wrap">
+  <div class="title">
+    <p class="eyebrow">Decentralized AI · protocol · pre-seed</p>
+    <h1>A blockchain whose state is a model.</h1>
+    <p class="lede">Technical companion for diligence: the architecture, what is
+      implemented and tested today, the honest security posture, and what the
+      raise buys down. Every claim below points at running code.</p>
+    <div class="meta">
+      <span><b>117</b> passing tests</span><span><b>~5,600</b> lines</span>
+      <span><b>33</b> modules</span><span>verified <b>cross-machine</b></span>
+      <span>numpy · py_ecc (BLS12-381) · libsodium</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>1 · Thesis</h2>
+    <p>Every decentralized-AI network keeps its incentive layer on-chain and its
+      model in someone's storage bucket. Palimpsest inverts that: <strong>the
+      model's weights are the chain state.</strong> A block is one optimizer step;
+      a transaction is a signed gradient update; the block header commits a Merkle
+      root over the weights; replaying the chain reconstructs the model bit-for-bit.
+      Compute joining the network either <strong>trains</strong> the weights or
+      <strong>serves</strong> them, and inference fees pay both — a network that
+      funds its own intelligence.</p>
+    <div class="callout"><p class="lab">The unclaimed prize</p>
+      <p>No network on earth currently pays <em>training</em> rewards out of
+        <em>inference</em> revenue; the field's largest runs a 20–40× emissions
+        subsidy. Reaching that crossover does not require the world's best model —
+        only one whose users pay more than its training costs. That is the entire
+        strategic target.</p></div>
+  </section>
+
+  <section>
+    <h2>2 · Architecture</h2>
+    <p>Five layers, bottom to top. Each is implemented and tested; the rightmost
+      column names the module.</p>
+    <div class="stack">
+      <div class="layer"><span class="n">State</span><span class="d"><b>Weights as chain state.</b> Paged, Merkle-committed; deterministic fixed-point aggregation; replay reconstructs the model. <span class="mono">chain.py, blockchain.py</span></span></div>
+      <div class="layer"><span class="n">Consensus</span><span class="d"><b>Scored mempool + Nakamoto fork choice.</b> A delta is included only if a committee measures it improves the model; heaviest valid chain wins. <span class="mono">blockchain.py, p2p.py</span></span></div>
+      <div class="layer"><span class="n">Randomness</span><span class="d"><b>Threshold-BLS beacon (drand-style), DKG-generated.</b> Unbiasable, unpredictable, verifiable; drives shard assignment and leader election. <span class="mono">beacon.py, dkg.py</span></span></div>
+      <div class="layer"><span class="n">Data</span><span class="d"><b>Erasure-coded data availability.</b> Reed-Solomon (any k-of-n reconstruct) + Merkle availability sampling; withheld bodies are unrecoverable and detected. <span class="mono">da.py</span></span></div>
+      <div class="layer"><span class="n">Economics</span><span class="d"><b>Difficulty-style write-price homeostat + stake/slash.</b> Holds admission at target, prices out spam, slashes provable faults. <span class="mono">economics.py</span></span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3 · What is implemented</h2>
+    <p>The rig attacks its own claims — the founding discipline is <em>stop citing,
+      start seeing.</em> Status is what the code demonstrates, not what it aspires to.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Capability</th><th>Evidence</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Model-as-chain-state, bit-exact replay</td><td class="mono">chain, blockchain</td><td class="ok">proven</td></tr>
+        <tr><td>Full flywheel: train → score → apply → serve → pay</td><td class="mono">e2e.py</td><td class="ok">runs (0.13→1.0)</td></tr>
+        <tr><td>Real transformer + MoE, through the chain</td><td class="mono">model2, moe_transformer</td><td class="ok">grad-checked 1e-8</td></tr>
+        <tr><td>Sparse serving, O(k) not O(experts), attested</td><td class="mono">moe_transformer</td><td class="ok">partial-recompute verifier</td></tr>
+        <tr><td>Async miners with real staleness</td><td class="mono">async_node.py</td><td class="ok">converges</td></tr>
+        <tr><td>Coordinator-free gossip consensus</td><td class="mono">p2p, gossip_net</td><td class="ok">cross-machine</td></tr>
+        <tr><td>Unbiasable beacon (threshold BLS + DKG)</td><td class="mono">beacon, dkg</td><td class="ok">proven</td></tr>
+        <tr><td>Erasure-coded DA + sampling</td><td class="mono">da.py</td><td class="ok">withholding caught 100%</td></tr>
+        <tr><td>Write-price homeostat + stake/slash</td><td class="mono">economics.py</td><td class="ok">holds target</td></tr>
+        <tr><td>Everything wired into one live loop</td><td class="mono">integrated.py</td><td class="ok">runs + live viewer</td></tr>
+        <tr><td>Revenue loop closing at scale</td><td class="mono">market outcome</td><td class="part">Phase 3 goal</td></tr>
+      </tbody>
+    </table></div>
+    <div class="stats">
+      <div class="stat"><div class="v">117</div><div class="l">automated tests, all passing</div></div>
+      <div class="stat"><div class="v">2</div><div class="l">machines: coordinator-free consensus over Tailscale</div></div>
+      <div class="stat"><div class="v">O(k)</div><div class="l">per-token serving cost, independent of model size</div></div>
+      <div class="stat"><div class="v">100%</div><div class="l">withholding attacks caught by DA sampling</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>4 · The distributed-systems stack is real</h2>
+    <p>The hard cryptographic and networking pieces are not hand-waved. Each maps
+      to an established design and runs in the rig.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Prior art</th><th>Palimpsest</th><th>Module</th></tr></thead>
+      <tbody>
+        <tr><td>Bitcoin signed transactions</td><td>Ed25519-signed delta commitments</td><td class="mono">crypto, ed25519</td></tr>
+        <tr><td>Bitcoin headers + longest chain</td><td>Hash-linked headers, heaviest-valid-chain fork choice</td><td class="mono">blockchain</td></tr>
+        <tr><td>Bitcoin P2P gossip</td><td>Async socket gossip, partition-heals, no coordinator</td><td class="mono">gossip_net</td></tr>
+        <tr><td>Bitcoin difficulty retarget</td><td>Write-price homeostat (damped for a sharper plant)</td><td class="mono">economics</td></tr>
+        <tr><td>drand threshold randomness</td><td>Threshold-BLS beacon with Feldman-VSS DKG</td><td class="mono">beacon, dkg</td></tr>
+        <tr><td>Celestia data availability</td><td>Reed-Solomon erasure coding + Merkle sampling</td><td class="mono">da</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>5 · Security posture — stated honestly</h2>
+    <p>Three attack surfaces, three locks. The one correction below is the most
+      important thing in this document, because it is where our own red-team
+      changed our claims.</p>
+    <ul>
+      <li><strong>Wrong compute</strong> — a delta earns inclusion only by
+        measurably improving loss on unpredictable held-out shards, under
+        commit-reveal scoring; every score is recomputable and challengeable.
+        Majority-honest compute secures this. Robust aggregation bounds minority
+        influence.</li>
+      <li><strong>Fake serving</strong> — receipts bind outputs to the committed
+        weights root; a verifier recomputes from only the pages a query used and
+        rejects tampering, under-loading, and forged outputs.</li>
+      <li><strong>Poisoned data</strong> — the honest hard problem, below.</li>
+    </ul>
+    <div class="callout warn"><p class="lab">The correction our red-team forced</p>
+      <p>The original intuition was that a 51% honest majority prevents poisoning.
+        Our red-team (<code>redteam.py</code>) disproved that: a stealthy backdoor
+        keyed to a secret trigger is invisible to blind detection, and a slow-drip
+        coalition can implant one from deltas each less conspicuous than honest
+        work — no matter how honest the majority. <strong>What actually defends is
+        staked data-admission (cost to get poison in) and replay-excision (removing
+        a backdoor once discovered — driven to zero effect in the rig).</strong> So
+        the claim is corrected from "poisoning is prevented" to "poisoning is made
+        costly and reversible." We found this before it could mislead anyone — which
+        is what a rig is for.</p></div>
+  </section>
+
+  <section>
+    <h2>6 · Reproducibility</h2>
+    <p>Everything is runnable and seeded. <code>scripts/run test</code> executes
+      117 tests; <code>scripts/run e2e</code> shows the flywheel; <code>scripts/run
+      integrated</code> runs beacon + DA + leader election in one loop;
+      <code>scripts/run live</code> opens a browser dashboard that streams the chain
+      block-by-block. The gossip network and the beacon have both been run
+      coordinator-free across two physical machines, producing a byte-identical
+      chain — where a node runs never changes the state.</p>
+  </section>
+
+  <section>
+    <h2>7 · Roadmap &amp; the crossover</h2>
+    <ul>
+      <li><strong>Phase 1 — devnet at real scale</strong> (months 0–6): a 7B model
+        on GPUs across ≥10 independent machines; production networking; real beacon
+        + DA in the live loop.</li>
+      <li><strong>Phase 2 — incentivized testnet + a vertical</strong> (months
+        4–12): a community with owned data; first external paying inference on the
+        attested tier; adversarial hardening at scale.</li>
+      <li><strong>Phase 3 — mainnet &amp; the crossover</strong> (months 10–24):
+        token genesis under strict fairness; the single public goal is the
+        <em>crossover block</em> — the first block where inference revenue exceeds
+        training issuance. No network has reached it.</li>
+    </ul>
+    <p>The rig has retired the architectural and distributed-systems risks. What
+      the raise buys down is three market-and-scale questions: does DiLoCo-class
+      training hold at 7B+ across untrusted machines; does a vertical exist whose
+      users pay more than its training costs; does the poisoning residual stay
+      manageable on a real model.</p>
+  </section>
+
+  <section style="border-bottom:none">
+    <h2>8 · The ask</h2>
+    <p>Pre-seed capital to stand up the Phase-1 devnet in a data-rich vertical and
+      drive toward the revenue crossover no network has reached. The design is
+      validated in running, tested code; what we're funding is the phase where the
+      remaining questions become answerable. Full whitepaper, the rig, and the live
+      viewer available under diligence.</p>
+  </section>
+</div>
+
+<footer><div class="wrap">
+  PALIMPSEST · technical brief · confidential pre-seed
+  <div class="d">Figures describe a toy-scale reference implementation and modeled
+    economics, not a live network, revenue, or committed customers. Forward-looking;
+    nothing here is an offer of securities.</div>
+</div></footer>
+
+<script>
+  (function(){var r=document.documentElement,k="palimpsest-theme";
+  try{var s=localStorage.getItem(k);if(s)r.setAttribute("data-theme",s);}catch(e){}
+  document.getElementById("tg").onclick=function(){
+    var c=r.getAttribute("data-theme");
+    if(!c)c=matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light";
+    var n=c==="dark"?"light":"dark";r.setAttribute("data-theme",n);
+    try{localStorage.setItem(k,n);}catch(e){}};})();
+</script>
