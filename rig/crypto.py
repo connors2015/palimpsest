@@ -1,0 +1,73 @@
+"""Keys, signatures, and signed transactions (WHITEPAPER §4, §5).
+
+Wraps the reference Ed25519 in a small API and defines the two signed message
+types the chain authenticates: a BackpropTx (a miner's delta commitment) and a
+generic signed envelope. Signing replaces the rig's earlier "trust the
+miner_id" with real authentication — a delta counts only if it carries a valid
+signature from the key that staked it.
+"""
+
+import hashlib
+import os
+from dataclasses import dataclass, field
+
+from . import ed25519
+
+
+@dataclass
+class Key:
+    """An Ed25519 keypair. `pub` (hex) is the on-chain identity of a node."""
+    sk: bytes
+    pk: bytes
+
+    @property
+    def pub(self) -> str:
+        return self.pk.hex()
+
+    @staticmethod
+    def generate(seed: bytes | None = None) -> "Key":
+        sk = seed if seed is not None else os.urandom(32)
+        if len(sk) != 32:
+            sk = hashlib.sha256(sk).digest()
+        return Key(sk=sk, pk=ed25519.publickey(sk))
+
+    def sign(self, msg: bytes) -> bytes:
+        return ed25519.signature(msg, self.sk, self.pk)
+
+
+def verify(pub_hex: str, msg: bytes, sig: bytes) -> bool:
+    try:
+        return ed25519.checkvalid(sig, msg, bytes.fromhex(pub_hex))
+    except Exception:
+        return False
+
+
+@dataclass
+class BackpropTx:
+    """A signed delta commitment (§4.1). The body (delta) lives on the DA layer;
+    the tx carries its hash, base height, shard, and a signature over all of it."""
+    miner: str            # signer pubkey (hex)
+    base_height: int
+    shard_id: int
+    delta_hash: str       # sha256 of the delta body bytes
+    da_pointer: str       # where the body can be fetched (DA layer key)
+    sig: bytes = b""
+
+    def signing_bytes(self) -> bytes:
+        return (f"backprop|{self.miner}|{self.base_height}|{self.shard_id}|"
+                f"{self.delta_hash}|{self.da_pointer}").encode()
+
+    def txid(self) -> str:
+        return hashlib.sha256(self.signing_bytes()).hexdigest()
+
+    def signed(self, key: Key) -> "BackpropTx":
+        assert key.pub == self.miner, "signer must match tx.miner"
+        self.sig = key.sign(self.signing_bytes())
+        return self
+
+    def verify(self) -> bool:
+        return verify(self.miner, self.signing_bytes(), self.sig)
+
+
+def delta_hash(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
