@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
-# Run any rig module with numpy available, regardless of system python.
-# Usage:  scripts/run e2e        # the end-to-end toy chain
-#         scripts/run run_all    # the full falsifier suite
+# Run a rig module (or the test suite) with numpy available, regardless of
+# the system python.
+# Usage:  scripts/run e2e        # the end-to-end toy chain (transformer)
+#         scripts/run node       # multiprocess miners over sockets
+#         scripts/run run_all    # the falsifier suite -> results/report.md
+#         scripts/run test       # the pytest suite
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mod="${1:-e2e}"
+target="${1:-e2e}"
 
-if python3 -c "import numpy" 2>/dev/null; then
-  exec python3 -m "rig.${mod}"
+have_numpy() { python3 -c "import numpy" 2>/dev/null; }
+
+if [ "$target" = "test" ]; then
+  if have_numpy && python3 -c "import pytest" 2>/dev/null; then
+    exec python3 -m pytest -q
+  elif command -v uv >/dev/null 2>&1; then
+    exec uv run --with numpy --with pytest python -m pytest -q
+  else
+    echo "need numpy+pytest: pip install numpy pytest   (or install uv)" >&2
+    exit 1
+  fi
+fi
+
+if have_numpy; then
+  exec python3 -m "rig.${target}"
 elif command -v uv >/dev/null 2>&1; then
-  exec uv run --with numpy python -m "rig.${mod}"
+  exec uv run --with numpy python -m "rig.${target}"
 else
   echo "need numpy: pip install numpy   (or install uv)" >&2
   exit 1

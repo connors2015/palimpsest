@@ -9,22 +9,43 @@ A blockchain whose state is the weights of a single public neural network. Trans
 
 ```
 scripts/run e2e        # the whole flywheel in one process (start here)
+scripts/run node       # the same loop across real miner subprocesses / sockets
 scripts/run run_all    # the falsifier suite -> results/report.md
+scripts/run test       # the pytest suite (30 tests)
 ```
 
-`scripts/run` uses system `numpy` if present, else falls back to `uv run --with numpy`.
-All randomness is seeded; every run is reproducible.
+`scripts/run` uses system `numpy`/`pytest` if present, else falls back to
+`uv run --with numpy`. All randomness is seeded; every run is reproducible.
 
 ### `rig/e2e.py` — the end-to-end toy chain
 
 One node that turns every block through the complete loop and shows the pieces
-working *together*: **train** (beacon-assigned miners) → **score** (commit-reveal
-loss impact) → **apply** (deterministic fixed-point aggregation, new state root)
-→ **serve** (attested forward-prop inference) → **attest** (a verifier recomputes
-a receipt and catches a fake-serving node) → **pay** (fees split, training pool +
-emission → miner rewards). Over 40 blocks the toy model climbs from chance to
-~0.97 accuracy, replays bit-exact from genesis, distributes rewards across
-honest miners, and slashes the fake node every block.
+working *together*: **train** (beacon-assigned miners run inner steps) →
+**score** (loss impact on an unpredictable eval batch) → **apply** (deterministic
+fixed-point aggregation, new state root) → **serve** (attested forward-prop
+inference) → **attest** (a verifier recomputes a receipt and catches a
+fake-serving node) → **pay** (fees split, training pool + emission → miner
+rewards). The model behind the flywheel is a real tiny transformer
+(`rig/model.py`, ~2.5k params, manual backprop, gradient-checked). Over 40
+blocks it climbs from chance to 1.0 accuracy on a delayed-copy task, replays
+bit-exact from genesis, distributes rewards across all miners, and slashes the
+fake node every block.
+
+### `rig/node.py` — multiprocess miners over sockets
+
+The same block loop with miners as **separate OS processes** connected to a
+coordinator over localhost TCP (length-prefixed pickle protocol,
+`rig/protocol.py`). Rounds are synchronous — each block, the coordinator ships
+weights + a beacon-assigned shard to every miner and waits for all deltas (the
+DiLoCo outer-sync barrier). The socket run and the in-memory run produce the
+**byte-identical chain**, so real multiprocess consensus stays fully
+reproducible.
+
+### `rig/storage.py` — persistence & fast-sync
+
+Blocks (delta bodies + periodic full checkpoints) persist to disk; a stopped
+node restarts via **fast sync** (latest checkpoint + later deltas) and lands on
+the identical state root as **full replay** from genesis.
 
 ### `rig/run_all.py` — the falsifier suite
 
