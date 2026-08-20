@@ -16,6 +16,7 @@ quantised delta.
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -104,8 +105,32 @@ class GPT(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-def build(cfg: GPTConfig = None, device: str = None):
+def apply_genesis(model: nn.Module, seed: int):
+    """Overwrite every parameter with a deterministic, version-independent draw so
+    the genesis weights are BIT-IDENTICAL on every node — the network constant.
+
+    torch's own init RNG differs across torch versions and devices (MPS vs CUDA),
+    which would fork the chain at genesis. numpy's RNG is byte-stable across
+    platforms/versions, so we seed the genesis from it. We still respect the init
+    scheme by parameter name (weights ~N(0,0.02); LayerNorm scale =1; biases =0),
+    and numpy draws are consumed in named_parameters() order — identical on all
+    nodes. set_flat_params-style .double() keeps it device-agnostic."""
+    rng = np.random.default_rng(seed)
+    with torch.no_grad():
+        for name, p in model.named_parameters():        # deterministic order
+            if name.endswith("bias") or "in_proj_bias" in name:
+                vals = np.zeros(tuple(p.shape))
+            elif name.endswith("weight") and (".ln" in name or name.startswith("ln")):
+                vals = np.ones(tuple(p.shape))          # LayerNorm scale
+            else:
+                vals = rng.standard_normal(tuple(p.shape)) * 0.02
+            p.copy_(torch.from_numpy(vals).to(dtype=p.dtype, device=p.device))
+
+
+def build(cfg: GPTConfig = None, device: str = None, seed: int = None):
     cfg = cfg or GPTConfig()
     device = device or pick_device()
     model = GPT(cfg).to(device)
+    if seed is not None:                                 # shared genesis across all nodes
+        apply_genesis(model, seed)
     return model, device

@@ -46,6 +46,7 @@ GOSSIP_CFG = GPTConfig(n_layer=2, n_head=4, n_embd=64, block_size=64)   # small:
 INNER_STEPS = 10
 BATCH = 24
 INCLUDE_K = 8
+GENESIS_SEED = 1337          # network constant: every node's genesis weights match
 DEVICE_OVERRIDE = None       # set by --device
 
 
@@ -64,7 +65,7 @@ class RealCore:
 
     def __init__(self, node_id, seed=0):
         self.node_id = node_id
-        self.model, self.device = build(GOSSIP_CFG, device=DEVICE_OVERRIDE)
+        self.model, self.device = build(GOSSIP_CFG, device=DEVICE_OVERRIDE, seed=GENESIS_SEED)
         self.data = ByteData(block_size=GOSSIP_CFG.block_size, device=self.device)
         self.miner = DiLoCoMiner(self.model, self.data, self.device)
         self.key = Key.generate(f"node{node_id}".encode().ljust(32, b"0"))
@@ -75,12 +76,24 @@ class RealCore:
         self.payload_store = {}                   # txid -> compressed payload, RETAINED
         self.comp = Compressor(keep_frac=KEEP_FRAC)
 
-    def train_delta(self):
-        """Blocking GPU work — kept on the main thread (MPS dislikes threads)."""
+    def head_snapshot(self):
+        """Read the current head on the CALLER's thread (cheap, touches the tree)."""
         hh = self.tree.blocks[self.tree.head].header.height
-        set_flat_params(self.model, dequantize(self.tree.head_state()))
+        return hh, dequantize(self.tree.head_state())
+
+    def train_from(self, hh, weights):
+        """The heavy GPU work — safe to run in an executor because it touches only
+        self.model, never the tree. The main thread keeps installing gossiped
+        blocks while this runs, so a fast peer can't starve a slow one. On CPU/CUDA
+        PyTorch releases the GIL here; the network loop stays responsive."""
+        set_flat_params(self.model, weights)
         delta, loss = self.miner.inner_train(INNER_STEPS, BATCH, seed=hh * 100 + self.node_id)
         return hh, delta, loss
+
+    def train_delta(self):
+        """Blocking convenience form (MPS path): snapshot + train on one thread."""
+        hh, weights = self.head_snapshot()
+        return self.train_from(hh, weights)
 
     def submit_delta(self, hh, delta_int, outbox):
         """Compress the delta (top-k + error feedback), sign a commitment tx, and
@@ -89,9 +102,10 @@ class RealCore:
             return
         payload = self.comp.compress(dequantize(delta_int))    # small on the wire
         dense = decompress(payload)                            # what everyone commits to
-        ptr = f"da://{self.key.pub[:8]}/{hh}/{self.node_id}"
+        dh = delta_hash(dense.tobytes())
+        ptr = f"da://{dh}"                                     # CONTENT address — unique per body
         tx = BackpropTx(miner=self.key.pub, base_height=hh, shard_id=self.node_id,
-                        delta_hash=delta_hash(dense.tobytes()), da_pointer=ptr).signed(self.key)
+                        delta_hash=dh, da_pointer=ptr).signed(self.key)
         if tx.txid() not in self.seen_tx:
             self.seen_tx.add(tx.txid())
             self.mempool[tx.txid()] = (tx, dense)
@@ -123,12 +137,24 @@ class RealCore:
         if not cands:
             return
         cands.sort(key=lambda t: t[0].txid())
-        chosen = cands[:INCLUDE_K]
+        chosen, seen_miners = [], set()
+        for tx, body in cands:                     # at most one delta per miner per block
+            if tx.miner in seen_miners:
+                continue
+            seen_miners.add(tx.miner)
+            chosen.append((tx, body))
+            if len(chosen) >= INCLUDE_K:
+                break
         accepted = [tx for tx, _ in chosen]
         bodies = {tx.da_pointer: body for tx, body in chosen}
         block = build_block(self.tree, head, accepted, bodies,
                             {tx.txid(): 1.0 for tx, _ in chosen}, self.key.pub)
-        if self.tree.add_block(block):
+        try:
+            became_head = self.tree.add_block(block)           # our own block; guard anyway
+        except ValidationError as e:
+            _dbg(self.node_id, f"own block rejected: {e}")
+            return
+        if became_head:
             self.seen_block.add(block.hash)
             self._prune(block)
             outbox.append(("block", block.header, block.txs))  # commitments only
@@ -225,17 +251,25 @@ class GossipNode:
         self.peer_ids = set()             # dedup: at most one connection per peer
         self._stop = asyncio.Event()
 
-    async def _peer(self, reader, writer):
+    async def _peer(self, reader, writer, dialer=False):
         await _send(writer, ("hello", self.core.node_id))
         try:
             hello = await _recv(reader)
             pid = hello[1] if hello and hello[0] == "hello" else None
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             writer.close(); return
-        if pid in self.peer_ids:          # already connected to this peer — drop the dup
+        if pid is None:
             writer.close(); return
-        if pid is not None:
-            self.peer_ids.add(pid)
+        # Simultaneous open: both peers dial AND accept, so two connections form.
+        # Resolve deterministically — keep the one whose DIALER has the smaller id.
+        # Both endpoints compute the same verdict, so exactly one full-duplex
+        # channel survives (mismatched closes would leave no working link).
+        keep = (self.core.node_id < pid) if dialer else (pid < self.core.node_id)
+        _dbg(self.core.node_id, f"hello pid={pid} dialer={dialer} keep={keep} "
+                                f"already={pid in self.peer_ids}")
+        if not keep or pid in self.peer_ids:
+            writer.close(); return
+        self.peer_ids.add(pid)
         self.writers.add(writer)
         try:
             for b in self.core.tree.chain_from_genesis():
@@ -253,12 +287,18 @@ class GossipNode:
         for _ in range(60):
             try:
                 r, w = await asyncio.open_connection(host, port)
-                await self._peer(r, w); return
-            except (ConnectionError, OSError):
+                _dbg(self.core.node_id, f"dialed {host}:{port} OK")
+                await self._peer(r, w, dialer=True)
+                _dbg(self.core.node_id, f"dial-peer to {host}:{port} ended")
+                return
+            except (ConnectionError, OSError) as e:
+                _dbg(self.core.node_id, f"dial {host}:{port} retry ({e})")
                 await asyncio.sleep(1)
 
     def _handle(self, msg):
         outbox = []
+        if _DBG:
+            print(f"    [n{self.core.node_id} RECV {msg[0]}]", flush=True)
         if msg[0] == "tx":
             self.core.recv_tx(msg[1], msg[2], outbox)          # (tx, payload)
         elif msg[0] == "block":
@@ -280,12 +320,22 @@ class GossipNode:
         except (ConnectionError, OSError):
             self.writers.discard(w)
 
-    async def _loop(self, seconds, settle=5.0):
+    async def _loop(self, seconds, settle=12.0):
+        loop = asyncio.get_event_loop()
+        # BACKPRESSURE FIX: on CPU/CUDA, run training in an executor so the network
+        # event loop keeps draining gossip while we train — a fast peer can no
+        # longer flood a slow peer into starvation (they stay head-synced because
+        # the slow peer installs received blocks *during* its own training). MPS
+        # misbehaves off the main thread, so it falls back to blocking training.
+        use_executor = self.core.device != "mps"
         end = time.time() + seconds
         while time.time() < end:
-            # train on the main thread (MPS dislikes background threads), then
-            # yield so queued gossip is processed before the next burst
-            hh, delta, loss = self.core.train_delta()
+            if use_executor:
+                hh, weights = self.core.head_snapshot()          # read tree on main thread
+                hh, delta, loss = await loop.run_in_executor(     # heavy work off-loop
+                    None, self.core.train_from, hh, weights)
+            else:
+                hh, delta, loss = self.core.train_delta()
             outbox = []
             self.core.submit_delta(hh, delta, outbox)
             rnd = int((time.time() - self.t0) / self.interval)
@@ -313,6 +363,8 @@ class GossipNode:
             for d in dials:
                 d.cancel()
         h = self.core.tree.blocks[self.core.tree.head].header.height
+        lineage = ">".join(b.hash[:6] for b in self.core.tree.chain_from_genesis())
+        print(f"node {self.core.node_id} LINEAGE {lineage}", flush=True)
         print(f"node {self.core.node_id} done — height {h}, head {self.core.tree.head[:16]}, "
               f"seen_tx {len(self.core.seen_tx)} seen_block {len(self.core.seen_block)} "
               f"pending {len(self.core.pending)} peers {len(self.writers)}, "
