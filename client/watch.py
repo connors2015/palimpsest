@@ -21,7 +21,10 @@ trainer with a window into itself).
 import argparse
 import asyncio
 import json
+import subprocess
+import sys
 import time
+import webbrowser
 
 from rig.chain import dequantize
 from .data import ByteData
@@ -162,15 +165,23 @@ async def _http(node: WatchNode, host, port):
 # --------------------------------------------------------------------------
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>palimpsest · chain watch</title><style>
+<title>palimpsest · chain watch</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧠</text></svg>">
+<style>
 :root{--bg:#0a0d12;--s:#111721;--s2:#0d1219;--ink:#dbe4ee;--mut:#6d7f92;--line:#1d2836;
 --a:#3fe6cd;--a2:#8f80ff;--mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
 font-family:var(--mono);font-size:14px;line-height:1.5}
 .wrap{max-width:1100px;margin:0 auto;padding:18px}
-header{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;
+header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;
 border-bottom:1px solid var(--line);padding-bottom:12px}
-h1{font-size:16px;margin:0;letter-spacing:.06em}h1 b{color:var(--a)}
+h1{font-size:16px;margin:0;letter-spacing:.06em;display:flex;align-items:center;gap:9px}
+h1 b{color:var(--a)}
+#dot{width:9px;height:9px;border-radius:50%;background:var(--a);
+box-shadow:0 0 8px var(--a);animation:pulse 1.6s ease-in-out infinite}
+#dot.dead{background:#c0392b;box-shadow:none;animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){#dot{animation:none}}
 #mode{color:var(--mut);font-size:12px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:16px 0}
 .stat{background:var(--s);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
@@ -199,7 +210,7 @@ font-family:var(--mono);font-weight:700;cursor:pointer;font-size:13px}
 button:disabled{opacity:.5}
 .note{color:var(--mut);font-size:11.5px;margin-top:8px}
 </style></head><body><div class="wrap">
-<header><h1>▚ <b>palimpsest</b> chain watch</h1><div id="mode">connecting…</div></header>
+<header><h1><span id="dot"></span><b>palimpsest</b> chain watch</h1><div id="mode">connecting…</div></header>
 <div class="grid">
  <div class="stat"><div class="k">height</div><div class="v" id="height">–</div></div>
  <div class="stat"><div class="k">head</div><div class="v" id="head" style="font-size:14px">–</div></div>
@@ -220,6 +231,7 @@ moment, stamped with its block. same prompt, later block → different (better) 
 </div><script>
 var lastH=-1;
 function poll(){fetch('/status').then(function(r){return r.json()}).then(function(s){
+ document.getElementById('dot').className='';
  document.getElementById('mode').textContent=s.mode+' node · live';
  ['height','peers','mempool','seen_tx'].forEach(function(k){
    document.getElementById(k).textContent=s[k]});
@@ -232,7 +244,8 @@ function poll(){fetch('/status').then(function(r){return r.json()}).then(functio
    bl.appendChild(d)});
  bl.scrollLeft=bl.scrollWidth;
  lastH=s.height;drawLoss(s.val);
-}).catch(function(){document.getElementById('mode').textContent='disconnected…'})}
+}).catch(function(){document.getElementById('dot').className='dead';
+ document.getElementById('mode').textContent='disconnected…'})}
 function drawLoss(v){var c=document.getElementById('loss'),x=c.getContext('2d');
  var W=c.width=c.clientWidth*2,H=c.height=180;x.clearRect(0,0,W,H);
  if(!v||v.length<2)return;var vs=v.map(function(p){return p[1]});
@@ -267,23 +280,56 @@ async def run(a):
     peers = [(h, int(p)) for h, p in (x.split(":") for x in a.peers.split(",") if x)]
     node = WatchNode(a.id, "0.0.0.0", a.port, peers, a.n, train=a.train)
     http_server = await _http(node, "0.0.0.0", a.http)
+    if a.open:
+        webbrowser.open(f"http://localhost:{a.http}")
     try:
         await node.run(a.seconds)
     finally:
         http_server.close()
 
 
+def _demo(a):
+    """The one-command app: spin up a small local chain (2 trainer nodes as
+    subprocesses), attach the observer + web UI to it, and open the browser.
+    Ctrl-C tears the whole thing down."""
+    t0 = time.time() + 4
+    kids = []
+    for i, port in enumerate((a.port + 1, a.port + 2)):
+        other = a.port + 2 if i == 0 else a.port + 1
+        kids.append(subprocess.Popen(
+            [sys.executable, "-m", "client.gossip", "--id", str(i),
+             "--port", str(port), "--peers",
+             f"127.0.0.1:{other},127.0.0.1:{a.port}",
+             "--n", "2", "--seconds", str(int(a.seconds)),
+             "--interval", "2.0", "--device", "cpu", "--t0", str(t0)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    print(f"demo chain: 2 trainer nodes launched — watch it live in the browser", flush=True)
+    a.id, a.peers = 9, f"127.0.0.1:{a.port+1},127.0.0.1:{a.port+2}"
+    a.n, a.open = 2, True
+    try:
+        asyncio.run(run(a))
+    finally:
+        for k in kids:
+            k.terminate()
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--id", type=int, required=True)
-    ap.add_argument("--port", type=int, required=True)      # gossip port
+    ap.add_argument("--demo", action="store_true",
+                    help="one command: local chain + web UI, opens your browser")
+    ap.add_argument("--id", type=int, default=9)
+    ap.add_argument("--port", type=int, default=9850)       # gossip port
     ap.add_argument("--peers", default="")                  # host:port,... of chain peers
     ap.add_argument("--n", type=int, default=2)             # trainer count (for leader rotation)
     ap.add_argument("--http", type=int, default=8080)       # the browser UI
     ap.add_argument("--seconds", type=float, default=1e9)   # run ~forever by default
     ap.add_argument("--train", action="store_true")         # also mine, not just watch
+    ap.add_argument("--open", action="store_true")          # auto-open the browser
     a = ap.parse_args()
-    asyncio.run(run(a))
+    if a.demo:
+        _demo(a)
+    else:
+        asyncio.run(run(a))
 
 
 if __name__ == "__main__":
