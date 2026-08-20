@@ -1,0 +1,18 @@
+[package]
+name = "palimpsest-node"
+version = "0.1.0"
+edition = "2021"
+description = "The runnable Palimpsest node: libp2p gossip over the bit-exact consensus core"
+
+[[bin]]
+name = "palimpsest-node"
+path = "src/main.rs"
+
+[dependencies]
+palimpsest-core = { path = "../core" }
+libp2p = { version = "0.55", features = ["tokio", "gossipsub", "noise", "yamux", "tcp", "quic", "identify", "macros", "ed25519"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+serde_json = "1"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"

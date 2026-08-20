@@ -166,6 +166,7 @@ pub fn txset_root(txids: &[String]) -> String {
 // Block header
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Debug)]
 pub struct Header {
     pub height: u64,
     pub prev_hash: String,
