@@ -117,6 +117,10 @@ pub struct BlockTree {
     pub head: String,
     pub genesis_hash: String,
     pub data_contributor: Option<String>,
+    /// keep full state vectors only this many blocks below the head (plus
+    /// genesis) — an 86M state is ~0.7GB, so retaining one per block OOMs.
+    /// Headers/ledgers/cum_work are kept forever (fork choice needs them).
+    pub prune_depth: Option<u64>,
 }
 
 impl BlockTree {
@@ -142,6 +146,7 @@ impl BlockTree {
             head: ghash.clone(),
             genesis_hash: ghash.clone(),
             data_contributor,
+            prune_depth: None,
         };
         t.blocks.insert(ghash.clone(), gh);
         t.state.insert(ghash.clone(), genesis_w);
@@ -199,11 +204,26 @@ impl BlockTree {
         self.cum_work.insert(bh.clone(), work);
         // heaviest chain wins; ties broken by lexicographically smaller hash
         let head_work = self.cum_work[&self.head];
-        if work > head_work || (work == head_work && bh < self.head) {
+        let became = work > head_work || (work == head_work && bh < self.head);
+        if became {
             self.head = bh;
-            return Ok(true);
         }
-        Ok(false)
+        self.prune_deep();
+        Ok(became)
+    }
+
+    /// Drop heavy state vectors more than prune_depth below the head.
+    fn prune_deep(&mut self) {
+        let Some(depth) = self.prune_depth else { return };
+        let head_h = self.blocks[&self.head].height;
+        let floor = head_h.saturating_sub(depth);
+        let doomed: Vec<String> = self.state.keys()
+            .filter(|h| **h != self.genesis_hash
+                    && self.blocks[*h].height < floor)
+            .cloned().collect();
+        for h in doomed {
+            self.state.remove(&h);
+        }
     }
 
     pub fn head_state(&self) -> &Vec<i64> {

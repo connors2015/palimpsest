@@ -1,323 +1,216 @@
-//! palimpsest-node — the runnable Rust node.
+//! palimpsest-node — the production Rust node.
 //!
-//! libp2p (GossipSub over QUIC/TCP + Noise) carries blocks; palimpsest-core
-//! (bit-exact against the Python reference via golden vectors) validates them
-//! and runs fork choice. This binary is the network layer milestone: a devnet
-//! of Rust nodes producing, gossiping, validating, and agreeing on a chain —
-//! with the full rev-3 ledger (emissions, registry, data share) live.
+//!   # a producing node with a PyTorch trainer attached:
+//!   palimpsest-node --data-dir ~/.palimpsest/node --wallet ~/.palimpsest/wallet.json \
+//!       --port 7900 --api-port 8090 --bridge-port 7999 --produce \
+//!       --peers /ip4/…/udp/7900/quic-v1 --data-contributor <addr>
+//!   python -m client.miner_bridge --node-port 7999 --model small …
 //!
-//!   # 3-node local devnet (run in three shells, or scripts/devnet.sh):
-//!   palimpsest-node --id 0 --n 3 --port 7700 --produce --seconds 30
-//!   palimpsest-node --id 1 --n 3 --port 7701 --peers /ip4/127.0.0.1/udp/7700/quic-v1 --produce --seconds 30
-//!   palimpsest-node --id 2 --n 3 --port 7702 --peers /ip4/127.0.0.1/udp/7700/quic-v1 --produce --seconds 30
+//!   # a seed/relay node (always-on bootstrap; relays NAT'd peers):
+//!   palimpsest-node --data-dir /var/palimpsest --key-seed <hex32> \
+//!       --port 7900 --api-port 8090 --relay-server
 //!
-//! Training is NOT here yet (the PyTorch bridge is the next ring): producers
-//! mint small deterministic-shape random deltas so consensus, gossip, fork
-//! choice, and the token ledger are exercised end to end at wire level.
+//! Genesis: --genesis-file <raw i64-LE .bin> (the ceremony artifact from
+//! client/make_genesis.py), or --toy-dim N for a deterministic toy vector.
+//! The wallet key IS the miner identity; encrypted wallets are decrypted with
+//! $PALIMPSEST_WALLET_PASSPHRASE (argon2id + XSalsa20-Poly1305, the exact
+//! pynacl construction).
+
+mod api;
+mod bridge;
+mod node;
+mod proto;
+mod store;
 
 use clap::Parser;
-use libp2p::{
-    futures::StreamExt,
-    gossipsub, identify,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    Multiaddr, SwarmBuilder,
-};
-use palimpsest_core::{
-    self as core,
-    blocktree::{Block, BlockTree},
-};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use libp2p::{Multiaddr, SwarmBuilder};
+use palimpsest_core as core;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(long)]
-    id: u64,
-    #[arg(long, default_value_t = 3)]
-    n: u64, // producers in the leader rotation
-    #[arg(long, default_value_t = 7700)]
-    port: u16,
+    #[arg(long, default_value = "palimpsest-data")]
+    data_dir: String,
     #[arg(long, default_value = "")]
-    peers: String, // comma-separated multiaddrs
+    wallet: String,          // wallet.json (identity); or:
+    #[arg(long, default_value = "")]
+    key_seed: String,        // raw 32-byte hex seed (devnet / infra nodes)
+    #[arg(long, default_value = "")]
+    genesis_file: String,    // raw i64-LE genesis vector (ceremony artifact)
+    #[arg(long, default_value_t = 0)]
+    toy_dim: usize,          // devnet: deterministic toy genesis of this size
+    #[arg(long, default_value_t = 7900)]
+    port: u16,
+    #[arg(long, default_value_t = 8090)]
+    api_port: u16,
+    #[arg(long, default_value_t = 7999)]
+    bridge_port: u16,
+    #[arg(long, default_value = "")]
+    peers: String,
     #[arg(long, default_value_t = false)]
     produce: bool,
-    #[arg(long, default_value_t = 3.0)]
-    interval: f64, // seconds per round
-    #[arg(long, default_value_t = 30.0)]
-    seconds: f64,
-    #[arg(long, default_value_t = 32)]
-    dim: usize, // toy state vector size
+    #[arg(long, default_value_t = 10.0)]
+    interval: f64,
+    #[arg(long, default_value = "")]
+    rotate: String,          // "n,id" — deterministic devnet leader rotation
+    #[arg(long, default_value_t = 0.0)]
+    seconds: f64,            // 0 = run forever
     #[arg(long, default_value = "")]
     data_contributor: String,
+    #[arg(long, default_value_t = false)]
+    relay_server: bool,      // seeds: relay NAT'd peers (circuit relay v2)
+    #[arg(long, default_value = "")]
+    external_address: String, // advertise a known public multiaddr
+    #[arg(long, default_value_t = 8)]
+    prune_depth: u64,
 }
 
-#[derive(NetworkBehaviour)]
-struct Behaviour {
-    gossipsub: gossipsub::Behaviour,
-    identify: identify::Behaviour,
+/// Decrypt a pynacl-encrypted wallet: argon2id(MODERATE) -> XSalsa20-Poly1305.
+fn decrypt_wallet(enc: &serde_json::Value, passphrase: &str) -> Option<[u8; 32]> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    use crypto_secretbox::aead::Aead;
+    use crypto_secretbox::{KeyInit, XSalsa20Poly1305};
+    let salt = hex::decode(enc["salt"].as_str()?).ok()?;
+    let blob = hex::decode(enc["blob"].as_str()?).ok()?;
+    // libsodium argon2id13 MODERATE: opslimit 3, memlimit 256 MiB
+    let params = Params::new(256 * 1024, 3, 1, Some(32)).ok()?;
+    let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    a2.hash_password_into(passphrase.as_bytes(), &salt, &mut key).ok()?;
+    let (nonce, ct) = blob.split_at(24);
+    let cipher = XSalsa20Poly1305::new((&key).into());
+    let sk = cipher.decrypt(nonce.into(), ct).ok()?;
+    sk.try_into().ok()
 }
 
-// ---------------------------------------------------------------------------
-// Block <-> JSON (the same shape the golden vectors use)
-// ---------------------------------------------------------------------------
-
-fn header_to_json(h: &core::Header) -> Value {
-    json!({"height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
-           "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
-           "proposer": h.proposer, "transfer_root": h.transfer_root,
-           "ledger_root": h.ledger_root, "data_root": h.data_root})
-}
-
-fn header_from_json(v: &Value) -> Option<core::Header> {
-    Some(core::Header {
-        height: v["height"].as_u64()?,
-        prev_hash: v["prev_hash"].as_str()?.into(),
-        state_root: v["state_root"].as_str()?.into(),
-        txset_root: v["txset_root"].as_str()?.into(),
-        n_txs: v["n_txs"].as_u64()?,
-        work: v["work"].as_u64()?,
-        proposer: v["proposer"].as_str()?.into(),
-        transfer_root: v["transfer_root"].as_str()?.into(),
-        ledger_root: v["ledger_root"].as_str()?.into(),
-        data_root: v["data_root"].as_str()?.into(),
-    })
-}
-
-fn block_to_json(b: &Block) -> Value {
-    json!({
-        "header": header_to_json(&b.header),
-        "txs": b.txs.iter().map(|t| json!({
-            "miner": t.miner, "base_height": t.base_height, "shard_id": t.shard_id,
-            "delta_hash": t.delta_hash, "da_pointer": t.da_pointer,
-            "sig": hex::encode(&t.sig)})).collect::<Vec<_>>(),
-        "bodies": b.bodies.iter().map(|(k, v)| (k.clone(), json!(v)))
-            .collect::<serde_json::Map<_, _>>(),
-    })
-}
-
-fn block_from_json(v: &Value) -> Option<Block> {
-    let header = header_from_json(&v["header"])?;
-    let mut txs = Vec::new();
-    for t in v["txs"].as_array()? {
-        txs.push(core::BackpropTx {
-            miner: t["miner"].as_str()?.into(),
-            base_height: t["base_height"].as_u64()?,
-            shard_id: t["shard_id"].as_u64()?,
-            delta_hash: t["delta_hash"].as_str()?.into(),
-            da_pointer: t["da_pointer"].as_str()?.into(),
-            sig: hex::decode(t["sig"].as_str()?).ok()?,
-        });
+fn load_identity(args: &Args) -> [u8; 32] {
+    if !args.key_seed.is_empty() {
+        let raw = hex::decode(&args.key_seed).expect("--key-seed must be hex");
+        return raw.try_into().expect("--key-seed must be 32 bytes");
     }
-    let mut bodies = HashMap::new();
-    for (k, arr) in v["bodies"].as_object()? {
-        bodies.insert(k.clone(),
-                      arr.as_array()?.iter().map(|x| x.as_i64().unwrap()).collect());
+    if !args.wallet.is_empty() {
+        let raw = std::fs::read_to_string(&args.wallet).expect("wallet file unreadable");
+        let w: serde_json::Value = serde_json::from_str(&raw).expect("wallet file corrupt");
+        if let Some(sk) = w.get("sk").and_then(|s| s.as_str()) {
+            return hex::decode(sk).unwrap().try_into().unwrap();
+        }
+        if let Some(enc) = w.get("enc") {
+            let pw = std::env::var("PALIMPSEST_WALLET_PASSPHRASE")
+                .expect("encrypted wallet: set PALIMPSEST_WALLET_PASSPHRASE");
+            return decrypt_wallet(enc, &pw)
+                .expect("wallet decryption failed (wrong passphrase?)");
+        }
+        panic!("wallet file has neither sk nor enc");
     }
-    Some(Block { header, txs, bodies, transfers: vec![], data_txs: vec![] })
+    panic!("identity required: --wallet or --key-seed");
 }
 
-// ---------------------------------------------------------------------------
-// Producer: mint a signed delta + build a valid block on the current head
-// ---------------------------------------------------------------------------
-
-fn produce_block(tree: &BlockTree, key: &core::Key, dim: usize, round: u64) -> Block {
-    // a deterministic-per-(round,node) pseudo-delta — stands in for the PyTorch
-    // pseudo-gradient until the training bridge lands (next ring)
-    let seed_bytes = format!("delta|{}|{}", round, key.pub_hex());
-    let h = core::delta_hash(seed_bytes.as_bytes());
-    let mut delta = vec![0i64; dim];
-    for (i, d) in delta.iter_mut().enumerate() {
-        let byte = u8::from_str_radix(&h[(i * 2) % 60..(i * 2) % 60 + 2], 16).unwrap();
-        *d = byte as i64 - 128;
+fn load_genesis(args: &Args, store: &store::Store) -> Vec<i64> {
+    if let Some(g) = store.read_genesis() {
+        return g;                                   // durable once written
     }
-    let parent = tree.head.clone();
-    let parent_h = tree.blocks[&parent].height;
-    let dh = core::delta_hash(&core::int64_bytes(&delta));
-    let mut tx = core::BackpropTx {
-        miner: key.pub_hex(),
-        base_height: parent_h,
-        shard_id: 0,
-        delta_hash: dh.clone(),
-        da_pointer: format!("da://{}", dh),
-        sig: vec![],
+    let g: Vec<i64> = if !args.genesis_file.is_empty() {
+        let raw = std::fs::read(&args.genesis_file).expect("genesis file unreadable");
+        raw.chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<i64>>()
+    } else if args.toy_dim > 0 {
+        (0..args.toy_dim as i64).map(|i| i * 100).collect::<Vec<i64>>()
+    } else {
+        panic!("genesis required: --genesis-file or --toy-dim");
     };
-    tx.sig = key.sign(&tx.signing_bytes());
-
-    let parent_w = &tree.state[&parent];
-    let mean = core::trimmed_mean(&[delta.clone()], 0.2);
-    let w: Vec<i64> = parent_w.iter().zip(&mean).map(|(a, b)| a + b).collect();
-    let mut ledger = tree.ledger[&parent].clone();
-    let mut header = core::Header {
-        height: parent_h + 1,
-        prev_hash: parent.clone(),
-        state_root: core::state_root(&w),
-        txset_root: core::txset_root(&[tx.txid()]),
-        n_txs: 1,
-        work: 1000,
-        proposer: key.pub_hex(),
-        transfer_root: core::token::transfer_root(&[]),
-        ledger_root: String::new(),
-        data_root: core::token::data_root(&[]),
-    };
-    ledger.resolve_expired_challenges(header.height);
-    ledger.apply_reward(header.height, &[tx.miner.clone()], &header.proposer, &[]);
-    header.ledger_root = ledger.root();
-    let mut bodies = HashMap::new();
-    bodies.insert(tx.da_pointer.clone(), delta);
-    Block { header, txs: vec![tx], bodies, transfers: vec![], data_txs: vec![] }
-}
-
-fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+    store.write_genesis(&g).expect("cannot persist genesis");
+    g
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,libp2p=warn")))
+        .init();
     let args = Args::parse();
 
-    // deterministic devnet identity from --id (real nodes use a wallet key)
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&args.id.to_le_bytes());
-    seed[8..16].copy_from_slice(b"palimpse");
+    let seed = load_identity(&args);
     let consensus_key = core::Key::from_seed(seed);
     let p2p_key = libp2p::identity::Keypair::ed25519_from_bytes(seed)?;
+    info!(miner = &consensus_key.pub_hex()[..12], "identity loaded");
 
-    // the shared devnet genesis: a fixed small state vector
-    let genesis_w: Vec<i64> = (0..args.dim as i64).map(|i| i * 100).collect();
-    let dc = if args.data_contributor.is_empty() { None } else {
-        Some(args.data_contributor.clone())
-    };
-    let mut tree = BlockTree::new(genesis_w, dc);
+    let store = store::Store::open(&args.data_dir)?;
+    let _genesis = load_genesis(&args, &store);  // side effect: persists genesis.bin
+    let dc = (!args.data_contributor.is_empty()).then(|| args.data_contributor.clone());
 
+    // replay any existing chain from disk (validated)
+    let (tree, blocks_full, payloads) = store
+        .replay(dc.clone(), args.prune_depth)
+        .expect("chain replay failed");
+
+    // swarm with the full NAT stack: QUIC+TCP, Noise, relay client, AutoNAT,
+    // DCUtR hole punching, optional relay server (seeds)
+    let relay_server = args.relay_server;
     let mut swarm = SwarmBuilder::with_existing_identity(p2p_key)
         .with_tokio()
         .with_tcp(libp2p::tcp::Config::default(),
                   libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_quic()
-        .with_behaviour(|key| {
-            let gs_cfg = gossipsub::ConfigBuilder::default()
-                .max_transmit_size(4 * 1024 * 1024)
-                .validation_mode(gossipsub::ValidationMode::Permissive)
-                .build()
-                .unwrap();
-            Behaviour {
-                gossipsub: gossipsub::Behaviour::new(
-                    gossipsub::MessageAuthenticity::Signed(key.clone()), gs_cfg).unwrap(),
-                identify: identify::Behaviour::new(identify::Config::new(
-                    "/palimpsest/0.3.0".into(), key.public())),
-            }
+        .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_behaviour(|key, relay_client| {
+            node::behaviour(key, relay_client, relay_server)
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(120)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
         .build();
 
-    let topic = gossipsub::IdentTopic::new("palimpsest/blocks/v3");
+    let topic = libp2p::gossipsub::IdentTopic::new("palimpsest/v1");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     swarm.listen_on(format!("/ip4/0.0.0.0/udp/{}/quic-v1", args.port).parse::<Multiaddr>()?)?;
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", args.port).parse::<Multiaddr>()?)?;
-    for p in args.peers.split(',').filter(|s| !s.is_empty()) {
-        swarm.dial(p.parse::<Multiaddr>()?)?;
-    }
-
-    let t0 = now() + 3.0;
-    let end = now() + args.seconds;
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
-    let mut last_round: i64 = -1;
-    let mut last_sync = now();
-    // retained full blocks (JSON) for the devnet chain-sync gossip; the tree
-    // itself keeps only headers + state
-    let mut full_blocks: HashMap<String, Value> = HashMap::new();
-
-    println!("node {} listening on {} (quic+tcp) — {}",
-             args.id, args.port, if args.produce { "producer" } else { "observer" });
-
-    while now() < end {
-        tokio::select! {
-            _ = tick.tick() => {
-                let round = ((now() - t0) / args.interval).floor() as i64;
-                if args.produce && round >= 0 && round != last_round
-                    && (round as u64) % args.n == args.id {
-                    last_round = round;
-                    let block = produce_block(&tree, &consensus_key, args.dim, round as u64);
-                    let bjson = block_to_json(&block);
-                    let bhash = block.hash();
-                    let msg = json!({"type": "block", "block": bjson.clone()});
-                    let _ = swarm.behaviour_mut().gossipsub
-                        .publish(topic.clone(), msg.to_string().into_bytes());
-                    match tree.add_block(block) {
-                        Ok(_) => {
-                            full_blocks.insert(bhash, bjson);
-                            println!("node {} PRODUCED h{} head={}",
-                                args.id, tree.blocks[&tree.head].height, &tree.head[..10]);
-                        }
-                        Err(e) => println!("node {} own block rejected: {}", args.id, e.0),
-                    }
-                }
-                // periodic full-chain sync gossip (devnet-crude IBD: chains are tiny)
-                if now() - last_sync > 5.0 {
-                    last_sync = now();
-                    let mut chain = Vec::new();
-                    let mut cur = tree.head.clone();
-                    let mut hashes = Vec::new();
-                    while cur != tree.genesis_hash {
-                        hashes.push(cur.clone());
-                        cur = tree.blocks[&cur].prev_hash.clone();
-                    }
-                    for h in hashes.iter().rev() {
-                        if let Some(b) = full_blocks.get(h) {
-                            chain.push(b.clone());
-                        }
-                    }
-                    if !chain.is_empty() {
-                        let msg = json!({"type": "chain", "blocks": chain});
-                        let _ = swarm.behaviour_mut().gossipsub
-                            .publish(topic.clone(), msg.to_string().into_bytes());
-                    }
-                }
-            }
-            ev = swarm.select_next_some() => {
-                if let SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
-                        gossipsub::Event::Message { message, .. })) = ev {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&message.data) {
-                        match v["type"].as_str() {
-                            Some("block") => {
-                                if let Some(b) = block_from_json(&v["block"]) {
-                                    let bh = b.hash();
-                                    if tree.add_block(b).is_ok() {
-                                        full_blocks.insert(bh, v["block"].clone());
-                                    }
-                                }
-                            }
-                            Some("chain") => {
-                                for bj in v["blocks"].as_array().unwrap_or(&vec![]) {
-                                    if let Some(b) = block_from_json(bj) {
-                                        let bh = b.hash();
-                                        if tree.add_block(b).is_ok() {
-                                            full_blocks.insert(bh, bj.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
+    if !args.external_address.is_empty() {
+        match args.external_address.parse::<Multiaddr>() {
+            Ok(a) => swarm.add_external_address(a),
+            Err(e) => warn!("bad --external-address: {e}"),
         }
     }
+    node::dial_peers(&mut swarm, &args.peers);
 
-    // final report — devnet convergence check greps these lines
-    let head = tree.blocks[&tree.head].clone();
-    let mut lineage = Vec::new();
-    let mut cur = tree.head.clone();
-    while cur != tree.genesis_hash {
-        lineage.push(cur[..6].to_string());
-        cur = tree.blocks[&cur].prev_hash.clone();
-    }
-    lineage.reverse();
-    println!("node {} LINEAGE {}", args.id, lineage.join(">"));
-    println!("node {} done — height {} head {} supply {} ledger {}",
-             args.id, head.height, &tree.head[..16],
-             tree.head_ledger().supply(), &tree.head_ledger().root()[..12]);
+    // channels: api <-> node, bridge <-> node
+    let (api_tx, api_rx) = mpsc::channel(64);
+    let (bridge_cmd_tx, bridge_cmd_rx) = mpsc::channel::<bridge::ToBridge>(16);
+    let (bridge_ev_tx, bridge_ev_rx) = mpsc::channel::<bridge::FromBridge>(16);
+    tokio::spawn(api::run(args.api_port, api_tx));
+    tokio::spawn(bridge::run(args.bridge_port, bridge_cmd_rx, bridge_ev_tx));
+
+    let rotate = (!args.rotate.is_empty()).then(|| {
+        let (n, id) = args.rotate.split_once(',').expect("--rotate n,id");
+        (n.parse().unwrap(), id.parse().unwrap())
+    });
+    let n = node::Node {
+        tree,
+        store,
+        key: consensus_key,
+        blocks_full,
+        payloads,
+        delta_pool: Default::default(),
+        account_pool: Default::default(),
+        pending: Default::default(),
+        seen: Default::default(),
+        cfg: node::NodeConfig {
+            produce: args.produce,
+            interval: args.interval,
+            rotate,
+            seconds: args.seconds,
+            data_contributor: dc,
+        },
+        topic,
+        bridge_tx: bridge_cmd_tx,
+        bridge_synced: false,
+        train_inflight: false,
+        t0: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),
+        last_proposed_round: -1,
+    };
+    node::run(n, swarm, api_rx, bridge_ev_rx).await;
     Ok(())
 }

@@ -126,6 +126,7 @@ pub fn verify_sig(pub_hex: &str, msg: &[u8], sig: &[u8]) -> bool {
 }
 
 /// A miner's signed delta commitment (§4.1).
+#[derive(Clone, Debug)]
 pub struct BackpropTx {
     pub miner: String,
     pub base_height: u64,

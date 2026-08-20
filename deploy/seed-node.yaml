@@ -1,16 +1,17 @@
-# Palimpsest seed node — the network's first always-on bootstrap peer.
+# Palimpsest seed node — always-on bootstrap peer + relay for the network.
 #
-# Runs as a full OBSERVER (client/watch.py): follows the chain, serves IBD to
-# joining peers, exposes the watch UI, and is a stable dial target for every
-# other node. v1 is reachable on the cluster's private network (NodePorts
-# below); PUBLIC exposure lands with the libp2p/NAT-traversal phase.
+# v2: runs the PRODUCTION RUST NODE (palimpsest-node) in --relay-server mode:
+# a stable dial target, chain-sync source, circuit-relay v2 for NAT'd peers,
+# and the HTTP API. An init container materializes the published genesis
+# artifact (deterministic from the published seed); the main container builds
+# the node from the pinned repo and runs it.
 #
 #   kubectl apply -f deploy/seed-node.yaml
-#   gossip:  <node-ip>:30980      watch UI:  http://<node-ip>:30981
+#   gossip/relay:  <node-ip>:30980 (udp+tcp)     api:  http://<node-ip>:30981
 #
-# The pod clones the private repo with a read-only deploy key (secret
-# `seed-deploy-key`), installs CPU torch, and runs the observer. Model/data
-# parameters MUST match the live chain's genesis parameters.
+# NOTE: first boot compiles the node (~8 min) and downloads CPU torch for the
+# genesis artifact (~3 min). A prebuilt image is the obvious optimization once
+# releases are cut; correctness first.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,9 +26,27 @@ spec:
     metadata:
       labels: {app: palimpsest-seed}
     spec:
+      initContainers:
+        - name: genesis
+          image: python:3.12-bookworm
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -e
+              if [ -f /shared/genesis.bin ]; then exit 0; fi
+              mkdir -p ~/.ssh && cp /keys/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
+              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+              git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
+              cd /app
+              pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+              pip install --no-cache-dir numpy pynacl
+              python -m client.make_genesis --model small --seed 1337 --out /shared/genesis.bin
+          volumeMounts:
+            - {name: deploy-key, mountPath: /keys, readOnly: true}
+            - {name: shared, mountPath: /shared}
       containers:
         - name: seed
-          image: python:3.12-bookworm
+          image: rust:1-bookworm
           command: ["/bin/bash", "-lc"]
           args:
             - |
@@ -35,32 +54,37 @@ spec:
               mkdir -p ~/.ssh && cp /keys/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
               ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
               git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
-              cd /app
-              pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
-              pip install --no-cache-dir numpy pynacl
-              mkdir -p data
-              curl -sL -r 0-20000000 -o data/stories_val.txt \
-                "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt"
-              exec python -m client.watch --id 8 --port 9800 --http 8080 \
-                --peers "" --n 2 --seconds 1000000000 \
-                --model small --data data/stories_val.txt --serve-device cpu \
+              cd /app/node && cargo build --release
+              exec target/release/palimpsest-node \
+                --data-dir /data \
+                --key-seed 5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed \
+                --genesis-file /shared/genesis.bin \
+                --port 9800 --api-port 8080 --bridge-port 7999 \
+                --relay-server \
                 --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
           ports:
-            - {containerPort: 9800, name: gossip}
-            - {containerPort: 8080, name: watch}
+            - {containerPort: 9800, protocol: UDP, name: gossip-udp}
+            - {containerPort: 9800, protocol: TCP, name: gossip-tcp}
+            - {containerPort: 8080, name: api}
           resources:
-            requests: {cpu: "1", memory: 2Gi}
-            limits: {cpu: "3", memory: 6Gi}
+            requests: {cpu: "1", memory: 3Gi}
+            limits: {cpu: "4", memory: 8Gi}
           volumeMounts:
             - {name: deploy-key, mountPath: /keys, readOnly: true}
+            - {name: shared, mountPath: /shared}
+            - {name: data, mountPath: /data}
           readinessProbe:
             httpGet: {path: /status, port: 8080}
-            initialDelaySeconds: 120
-            periodSeconds: 15
-            failureThreshold: 40
+            initialDelaySeconds: 240
+            periodSeconds: 20
+            failureThreshold: 60
       volumes:
         - name: deploy-key
           secret: {secretName: seed-deploy-key, defaultMode: 0400}
+        - name: shared
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -71,5 +95,6 @@ spec:
   type: NodePort
   selector: {app: palimpsest-seed}
   ports:
-    - {name: gossip, port: 9800, targetPort: 9800, nodePort: 30980}
-    - {name: watch, port: 8080, targetPort: 8080, nodePort: 30981}
+    - {name: gossip-udp, port: 9800, targetPort: 9800, nodePort: 30980, protocol: UDP}
+    - {name: gossip-tcp, port: 9800, targetPort: 9800, nodePort: 30980, protocol: TCP}
+    - {name: api, port: 8080, targetPort: 8080, nodePort: 30981}

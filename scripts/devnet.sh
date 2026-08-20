@@ -1,11 +1,34 @@
 #!/bin/bash
-# 3-node local Rust devnet: gossip over libp2p (QUIC+Noise), full rev-3 validation.
+# Rust devnet: 2 producing nodes + 2 PyTorch trainer bridges; asserts convergence.
 set -e
-cd "$(dirname "$0")/../node"
-cargo build --release
-B=target/release/palimpsest-node
-S=${1:-30}
-$B --id 0 --n 3 --port 7700 --produce --seconds $S --interval 2 &
-$B --id 1 --n 3 --port 7701 --peers /ip4/127.0.0.1/udp/7700/quic-v1 --produce --seconds $S --interval 2 &
-$B --id 2 --n 3 --port 7702 --peers /ip4/127.0.0.1/udp/7700/quic-v1,/ip4/127.0.0.1/udp/7701/quic-v1 --produce --seconds $S --interval 2 &
-wait
+cd "$(dirname "$0")/.."
+( cd node && cargo build --release )
+B=node/target/release/palimpsest-node
+S=${1:-90}
+FOUNDER=${FOUNDER:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}
+rm -rf /tmp/devnet0 /tmp/devnet1
+uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
+    --model toy --seed 1337 --out /tmp/devnet_genesis.bin
+$B --data-dir /tmp/devnet0 --key-seed $(printf 'a%.0s' {1..64} | head -c 64) \
+   --genesis-file /tmp/devnet_genesis.bin --port 7900 --api-port 8190 \
+   --bridge-port 7999 --produce --interval 6 --rotate 2,0 --seconds $S \
+   --data-contributor $FOUNDER > /tmp/devnet0.log 2>&1 &
+$B --data-dir /tmp/devnet1 --key-seed $(printf 'b%.0s' {1..64} | head -c 64) \
+   --genesis-file /tmp/devnet_genesis.bin --port 7901 --api-port 8191 \
+   --bridge-port 7998 --produce --interval 6 --rotate 2,1 --seconds $S \
+   --peers /ip4/127.0.0.1/udp/7900/quic-v1 \
+   --data-contributor $FOUNDER > /tmp/devnet1.log 2>&1 &
+sleep 3
+uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
+    --node-port 7999 --model toy --inner 10 --batch 16 --device cpu > /tmp/devnetb0.log 2>&1 &
+uv run --with torch --with numpy --with pynacl python -m client.miner_bridge \
+    --node-port 7998 --model toy --inner 10 --batch 16 --device cpu > /tmp/devnetb1.log 2>&1 &
+wait %1 %2 || true
+kill %3 %4 2>/dev/null || true
+L0=$(grep LINEAGE /tmp/devnet0.log); L1=$(grep LINEAGE /tmp/devnet1.log)
+echo "$L0"; echo "$L1"
+if [ -n "$L0" ] && [ "$L0" = "$L1" ]; then
+    echo "DEVNET CONVERGED ✓"
+else
+    echo "DEVNET DIVERGED ✗"; exit 1
+fi

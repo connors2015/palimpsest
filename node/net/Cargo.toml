@@ -1,8 +1,8 @@
 [package]
 name = "palimpsest-node"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
-description = "The runnable Palimpsest node: libp2p gossip over the bit-exact consensus core"
+description = "The production Palimpsest node: libp2p networking (NAT-traversing), PyTorch training bridge, persistence, HTTP API — over the bit-exact consensus core"
 
 [[bin]]
 name = "palimpsest-node"
@@ -10,9 +10,20 @@ path = "src/main.rs"
 
 [dependencies]
 palimpsest-core = { path = "../core" }
-libp2p = { version = "0.55", features = ["tokio", "gossipsub", "noise", "yamux", "tcp", "quic", "identify", "macros", "ed25519"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+libp2p = { version = "0.55", features = [
+    "tokio", "gossipsub", "noise", "yamux", "tcp", "quic", "identify",
+    "macros", "ed25519", "request-response", "json", "autonat", "dcutr",
+    "relay", "ping",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "net", "io-util", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+argon2 = "0.5"
+crypto_secretbox = "0.1"
