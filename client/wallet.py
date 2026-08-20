@@ -1,20 +1,27 @@
 """Your wallet — an Ed25519 keypair on YOUR machine, never anywhere else.
 
-The secret key lives in a mode-0600 file under ~/.palimpsest/ (or --path). It is
-never transmitted, never logged, and must NEVER enter a git repository. The
-address (sha256 of the pubkey, 20 bytes) is what the chain knows you as: block
-rewards for your training deltas, data royalties, and transfers all land there.
+The secret key lives in a mode-0600 file under ~/.palimpsest/ (or --path),
+ENCRYPTED with a passphrase (argon2id key derivation + libsodium SecretBox) —
+and is never transmitted, never logged, and must NEVER enter a git repository.
+On creation you also get a BIP39 24-word mnemonic: write it down; it alone can
+restore the wallet (`restore`). Addresses display as checksummed bech32
+(`pal1…`) so a typo cannot burn funds; the chain's internal form stays hex.
 
-  python -m client.wallet new                  # create (refuses to overwrite)
+  python -m client.wallet new                  # create (passphrase + mnemonic)
+  python -m client.wallet restore              # rebuild from the 24 words
   python -m client.wallet show                 # address + pubkey (never the secret)
   python -m client.wallet balance --node http://localhost:8090
-  python -m client.wallet send --to <addr> --amount 1.5 --node http://localhost:8090
+  python -m client.wallet send --to pal1… --amount 1.5 --node http://localhost:8090
+
+Extra deps for the hardened features: `pip install mnemonic bech32`
+(both are the reference implementations of their standards).
 
 For the REAL genesis ceremony: generate the founding wallet fresh, offline, on a
-machine you trust, and back up the file — the key IS the wallet.
+machine you trust — the mnemonic IS the wallet.
 """
 
 import argparse
+import getpass
 import json
 import os
 import stat
@@ -25,14 +32,58 @@ from rig.token import GRAIN, TransferTx, address
 
 DEFAULT_DIR = os.path.expanduser("~/.palimpsest")
 DEFAULT_PATH = os.path.join(DEFAULT_DIR, "wallet.json")
+HRP = "pal"                                       # bech32 human-readable prefix
 
 
-def create(path: str) -> dict:
-    if os.path.exists(path):
-        raise SystemExit(f"refusing to overwrite existing wallet: {path}")
-    key = Key.generate()                          # 32 random bytes from os.urandom
+# ---- checksummed display addresses (bech32; internal hex is consensus) ------
+def to_display(addr_hex: str) -> str:
+    try:
+        import bech32
+        return bech32.bech32_encode(
+            HRP, bech32.convertbits(bytes.fromhex(addr_hex), 8, 5))
+    except ImportError:
+        return addr_hex                            # graceful: hex still works
+
+def parse_addr(s: str) -> str:
+    """Accept pal1… (checksum-verified) or raw 40-hex; return internal hex."""
+    if s.startswith(HRP + "1"):
+        import bech32
+        hrp, data = bech32.bech32_decode(s)
+        if hrp != HRP or data is None:
+            raise SystemExit(f"bad address (checksum failed): {s}")
+        return bytes(bech32.convertbits(data, 5, 8, False)).hex()
+    if len(s) == 40 and all(c in "0123456789abcdef" for c in s.lower()):
+        return s.lower()
+    raise SystemExit(f"not a valid address: {s}")
+
+
+# ---- encrypted wallet file --------------------------------------------------
+def _encrypt_sk(sk: bytes, passphrase: str) -> dict:
+    from nacl import pwhash, secret, utils
+    salt = utils.random(pwhash.argon2id.SALTBYTES)
+    key = pwhash.argon2id.kdf(secret.SecretBox.KEY_SIZE, passphrase.encode(), salt,
+                              opslimit=pwhash.argon2id.OPSLIMIT_MODERATE,
+                              memlimit=pwhash.argon2id.MEMLIMIT_MODERATE)
+    blob = secret.SecretBox(key).encrypt(sk)       # nonce included in blob
+    return {"kdf": "argon2id", "salt": salt.hex(), "blob": bytes(blob).hex()}
+
+def _decrypt_sk(enc: dict, passphrase: str) -> bytes:
+    from nacl import pwhash, secret
+    key = pwhash.argon2id.kdf(secret.SecretBox.KEY_SIZE, passphrase.encode(),
+                              bytes.fromhex(enc["salt"]),
+                              opslimit=pwhash.argon2id.OPSLIMIT_MODERATE,
+                              memlimit=pwhash.argon2id.MEMLIMIT_MODERATE)
+    return secret.SecretBox(key).decrypt(bytes.fromhex(enc["blob"]))
+
+
+def _write_wallet(path: str, key: Key, passphrase: str) -> dict:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    rec = {"sk": key.sk.hex(), "pub": key.pub, "address": address(key.pub)}
+    rec = {"version": 2, "pub": key.pub, "address": address(key.pub)}
+    if passphrase:
+        rec["enc"] = _encrypt_sk(key.sk, passphrase)
+    else:
+        print("⚠ empty passphrase — storing the key UNENCRYPTED (testnet only)")
+        rec["sk"] = key.sk.hex()
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(rec, f, indent=1)
@@ -40,10 +91,60 @@ def create(path: str) -> dict:
     return rec
 
 
+def _mnemonic_for(sk: bytes) -> str | None:
+    try:
+        from mnemonic import Mnemonic
+        return Mnemonic("english").to_mnemonic(sk)   # 32 bytes -> 24 words
+    except ImportError:
+        return None
+
+
+def create(path: str) -> dict:
+    if os.path.exists(path):
+        raise SystemExit(f"refusing to overwrite existing wallet: {path}")
+    key = Key.generate()                          # 32 random bytes from os.urandom
+    pw = getpass.getpass("passphrase for the wallet file (empty = unencrypted): ")
+    if pw and pw != getpass.getpass("repeat passphrase: "):
+        raise SystemExit("passphrases do not match")
+    rec = _write_wallet(path, key, pw)
+    words = _mnemonic_for(key.sk)
+    if words:
+        print("\n=== RECOVERY MNEMONIC — write these 24 words down, in order ===")
+        print(words)
+        print("=== anyone with these words owns the wallet; store them offline ===\n")
+    else:
+        print("(`pip install mnemonic` to get a recovery phrase next time)")
+    return rec
+
+
+def restore(path: str) -> dict:
+    if os.path.exists(path):
+        raise SystemExit(f"refusing to overwrite existing wallet: {path}")
+    try:
+        from mnemonic import Mnemonic
+    except ImportError:
+        raise SystemExit("restore needs the reference BIP39 lib: pip install mnemonic")
+    words = input("enter your 24-word mnemonic: ").strip()
+    m = Mnemonic("english")
+    if not m.check(words):
+        raise SystemExit("mnemonic checksum failed — check the words and order")
+    sk = bytes(m.to_entropy(words))
+    key = Key.generate(sk)
+    pw = getpass.getpass("new passphrase for the wallet file (empty = unencrypted): ")
+    rec = _write_wallet(path, key, pw)
+    print(f"restored: {to_display(rec['address'])}")
+    return rec
+
+
 def load(path: str) -> tuple[Key, dict]:
     with open(path) as f:
         rec = json.load(f)
-    key = Key.generate(bytes.fromhex(rec["sk"]))
+    if "enc" in rec:
+        pw = getpass.getpass("wallet passphrase: ")
+        sk = _decrypt_sk(rec["enc"], pw)
+    else:
+        sk = bytes.fromhex(rec["sk"])              # legacy/unencrypted
+    key = Key.generate(sk)
     assert key.pub == rec["pub"], "wallet file corrupt (pub mismatch)"
     return key, rec
 
@@ -63,7 +164,7 @@ def _post(node: str, route: str, payload: dict):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["new", "show", "balance", "send",
+    ap.add_argument("cmd", choices=["new", "restore", "show", "balance", "send",
                                     "submit-data", "challenge", "vote", "registry"])
     ap.add_argument("--path", default=DEFAULT_PATH)
     ap.add_argument("--node", default="http://localhost:8090")
@@ -81,24 +182,27 @@ def main():
     if a.cmd == "new":
         rec = create(a.path)
         print(f"wallet created: {a.path}  (mode 0600 — BACK THIS FILE UP)")
-        print(f"address: {rec['address']}")
+        print(f"address: {to_display(rec['address'])}  (hex {rec['address']})")
         print(f"pubkey:  {rec['pub']}")
+        return
+    if a.cmd == "restore":
+        restore(a.path)
         return
 
     key, rec = load(a.path)
     if a.cmd == "show":
-        print(f"address: {rec['address']}")
+        print(f"address: {to_display(rec['address'])}  (hex {rec['address']})")
         print(f"pubkey:  {rec['pub']}")
     elif a.cmd == "balance":
         out = _get(a.node, f"/balance?addr={rec['address']}")
-        print(f"address: {rec['address']}")
+        print(f"address: {to_display(rec['address'])}")
         print(f"balance: {out['grains'] / GRAIN:.9f} PALIMPSEST "
               f"({out['grains']} grains) @ block {out['height']}")
     elif a.cmd == "send":
         if not a.to or a.amount is None:
             raise SystemExit("send needs --to and --amount")
         info = _get(a.node, f"/balance?addr={rec['address']}")
-        tx = TransferTx(from_pub=rec["pub"], to_addr=a.to,
+        tx = TransferTx(from_pub=rec["pub"], to_addr=parse_addr(a.to),
                         amount=int(round(a.amount * GRAIN)),
                         nonce=info.get("nonce", 0)).signed(key)
         out = _post(a.node, "/transfer", {
