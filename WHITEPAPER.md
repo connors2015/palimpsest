@@ -373,13 +373,28 @@ The 25% training share is the founding thesis — *inference funds training* —
 
 Backprop admission (§4.1) carries a floating fee: when candidate-delta volume exceeds what committees can evaluate well (or aggregate quality sags), the write price rises; when capacity idles, it falls — a difficulty-adjustment controller holding *evaluation load and workspace interference* at the network's capacity frontier, exactly as Bitcoin's difficulty holds block rate against hash power. (This is the design's origin story earning its keep: spam, sybil grinding, and low-effort delta floods are all the same phenomenon — interference — and all priced out by the same controller.) A matching, gentler controller floats the inclusion-quality threshold (§5.2) against the block's delta budget.
 
+### 9.4a The capacity retarget — model size as difficulty
+
+The fourth knob of the homeostat family, and the one that makes joining compute *compound* instead of merely crowding: **the parameter count itself retargets against the network's training capacity**, the way Bitcoin's difficulty retargets against hash power. Where Bitcoin spends surplus compute on a harder puzzle (security), Palimpsest spends it on a bigger brain (capability — which *is* our security: every joined GPU is embodied in weights a challenger must reproduce, and outvoting the training set grows proportionally costlier).
+
+Two things Bitcoin's controller never had to face, and their resolutions:
+
+- **Measurement.** Hash power is self-evidencing; training compute is not. The retarget therefore consumes only *chain-observable, sybil-resistant* signals: the count of accepted-and-scored deltas per retarget window (junk deltas score ~zero, so flooding doesn't register), block fullness against the inclusion budget, and delta staleness (late deltas = the model already strains the fleet). No FLOP-proofs required — the same signal family the write price already consumes.
+
+- **Irreversibility.** Difficulty adjusts down; a model cannot un-grow without destroying trained value. The controller is therefore a **ratchet with an elastic active set**, on two timescales:
+  1. **Fast knob (continuous, reversible):** the per-delta work quota — required inner steps and shard size per block — adjusts damped every window, holding block cadence and per-node load steady as miners come and go. This is the literal difficulty analog.
+  2. **Slow knob (discrete, ratcheted):** when the fast knob has been pinned at its ceiling for K consecutive windows — a *sustained* compute surplus — a **growth event** fires: bounded (at most one new module per level per event; §3.1 pages, DiPaCo modules as the growth unit), announced N blocks ahead so nodes pre-provision memory, with the new pages initialized **deterministically from the trigger block's hash** — every node computes the same decision at the same height with identical new weights. No vote, no coordinator; consensus-safe by construction (on-chain model growth is Phase-0-proven).
+  When compute *leaves*, total parameters never shrink — the network instead **freezes modules** (they stop training but keep serving inference) until capacity returns: total capacity ratchets monotonically, *active* capacity breathes with the fleet — a graceful degradation MoE sparsity provides for free.
+
+The governance consequence is the point: capacity growth is **algorithmic, not political**. Nobody votes on whether the model grows — governance only sets the controller's constants (window sizes, damping, growth bound), which are then as hard to move as any §10 parameter. "The network grew its brain at block N because its miners earned it" is simultaneously the mechanism, the security model, and the story.
+
 ### 9.5 The bootstrap tunnel, with honest numbers
 
 Target: a 7–40B specialized model (§11). Order-of-magnitude arithmetic a seed deck must survive: pretraining a ~20B model on ~1–2T tokens costs low-single-digit $M in centralized compute; multiply by ~2–3× for the permissionless handicap (WAN, scoring overhead, redundancy — §12.1) → **$5–15M of emission-funded work to reach a servable v1**, then continuous post-training at a small fraction of that rate. The crossover condition is then: sustained API revenue ≥ ~25× the steady-state training burn × (1/training-share). A specialized model earning $2–5M ARR — a modest B2B business — sustains a $0.5–1.5M/yr continuous-training budget at the 25% share. These are achievable, checkable numbers, and publishing them is itself a differentiator in a field that hides its unit economics behind emissions.
 
 ### 9.6 The serving-arbitrage ledger
 
-Making §8.4 concrete: let c = a node's cost per token served, m = market inference margin. Mirror earns m − c. On-chain node earns (fee share − c) + protocol rewards r. The protocol sets the posted price such that fee share − c ≈ m − c *minus* r — i.e., the API undercuts mirror breakeven by approximately r while nodes stay whole. r is funded by emission during bootstrap and by the burn/reward flows at maturity. The controller keeping serving capacity matched to demand adjusts r's serving component the way §9.4 adjusts the write price — one homeostat family, three knobs (write price, quality threshold, serving reward).
+Making §8.4 concrete: let c = a node's cost per token served, m = market inference margin. Mirror earns m − c. On-chain node earns (fee share − c) + protocol rewards r. The protocol sets the posted price such that fee share − c ≈ m − c *minus* r — i.e., the API undercuts mirror breakeven by approximately r while nodes stay whole. r is funded by emission during bootstrap and by the burn/reward flows at maturity. The controller keeping serving capacity matched to demand adjusts r's serving component the way §9.4 adjusts the write price — one homeostat family, four knobs (write price, quality threshold, serving reward, and the capacity retarget of §9.4a).
 
 ### 9.7 Reflexivity, stated plainly
 
