@@ -47,10 +47,11 @@ spec:
       containers:
         - name: seed
           image: rust:1-bookworm
-          command: ["/bin/bash", "-lc"]
+          command: ["/bin/bash", "-c"]   # NOT -l: a login shell drops cargo from PATH
           args:
             - |
               set -e
+              export PATH=/usr/local/cargo/bin:$PATH
               mkdir -p ~/.ssh && cp /keys/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
               ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
               git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
