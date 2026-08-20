@@ -27,6 +27,7 @@ import numpy as np
 from rig.chain import dequantize, quantize, state_root, trimmed_mean_int
 from rig.crypto import BackpropTx, Key, delta_hash
 from rig.protocol import recv_msg, send_msg
+from .compress import Compressor, decompress, payload_bytes
 from .data import ByteData
 from .gpt import GPTConfig, build
 from .trainer import DiLoCoMiner, flat_params, set_flat_params
@@ -35,6 +36,7 @@ from .trainer import DiLoCoMiner, flat_params, set_flat_params
 MODEL_CFG = GPTConfig(n_layer=4, n_head=4, n_embd=128, block_size=128)
 INNER_STEPS = 15
 BATCH = 32
+KEEP_FRAC = 0.02        # top-k delta compression (~50x on the wire)
 
 
 def _new_model():
@@ -72,10 +74,11 @@ def run_coordinator(port, n_miners, rounds, host="0.0.0.0", seed=0):
         w_bytes = dequantize(base).astype(np.float32).tobytes()   # send head (fp32)
         for mid, (c, _) in conns.items():
             send_msg(c, {"type": "train", "weights": w_bytes, "height": r})
-        deltas = []
+        deltas, wire = [], 0
         for mid, (c, pub) in conns.items():                       # synchronous barrier
             m = recv_msg(c)
-            d = np.frombuffer(m["delta"], dtype=np.int64).copy()
+            d = decompress(m["payload"])                          # compressed on the wire
+            wire += payload_bytes(m["payload"])
             tx = BackpropTx(miner=pub, base_height=r, shard_id=mid,
                             delta_hash=delta_hash(d.tobytes()), da_pointer=f"da://{r}/{mid}")
             tx.sig = m["sig"]
@@ -86,8 +89,10 @@ def run_coordinator(port, n_miners, rounds, host="0.0.0.0", seed=0):
         if deltas:
             base = base + trimmed_mean_int(deltas)
         if r % 4 == 0 or r == rounds - 1:
+            raw = n_params * 8 * n_miners
             print(f"  round {r:>2}  val loss {val():.3f}  deltas {len(deltas)}/{n_miners}  "
-                  f"root {state_root(base)[:10]}  ({time.time()-t0:.0f}s)", flush=True)
+                  f"root {state_root(base)[:10]}  wire {wire/1e3:.0f}KB (vs {raw/1e6:.0f}MB "
+                  f"raw, {raw/max(1,wire):.0f}x)  ({time.time()-t0:.0f}s)", flush=True)
 
     for c, _ in conns.values():
         send_msg(c, {"type": "stop"}); c.close()
@@ -116,6 +121,7 @@ def run_miner(host, port, miner_id, seed=0):
         raise ConnectionError(f"could not reach coordinator {host}:{port}")
     send_msg(sock, {"type": "hello", "miner_id": miner_id, "pub": key.pub})
     print(f"miner {miner_id} connected to {host}:{port} — real GPT on {device}", flush=True)
+    comp = Compressor(keep_frac=KEEP_FRAC)               # top-k + error feedback
     n = 0
     try:
         while True:
@@ -125,13 +131,15 @@ def run_miner(host, port, miner_id, seed=0):
             w = np.frombuffer(msg["weights"], dtype=np.float32).astype(np.float64)
             set_flat_params(model, w)                            # sync head
             delta, loss = miner.inner_train(INNER_STEPS, BATCH, seed=seed * 1000 + n)
+            payload = comp.compress(dequantize(delta))           # compress for the wire
+            dense = decompress(payload)                          # what the chain commits to
             sig = key.sign(BackpropTx(miner=key.pub, base_height=msg["height"],
                                       shard_id=miner_id,
-                                      delta_hash=delta_hash(delta.tobytes()),
+                                      delta_hash=delta_hash(dense.tobytes()),
                                       da_pointer=f"da://{msg['height']}/{miner_id}"
                                       ).signing_bytes())
             send_msg(sock, {"type": "delta", "miner_id": miner_id,
-                            "delta": delta.tobytes(), "sig": sig})
+                            "payload": payload, "sig": sig})
             n += 1
             print(f"  miner {miner_id} round {n}: inner loss {loss:.3f}", flush=True)
     finally:

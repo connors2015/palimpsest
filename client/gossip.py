@@ -17,19 +17,30 @@ the mechanism is identical at any size.
 
 import argparse
 import asyncio
+import os
 import pickle
 import struct
 import time
 from dataclasses import dataclass, field
 
+_DBG = os.environ.get("GOSSIP_DEBUG")
+
+
+def _dbg(nid, *a):
+    if _DBG:
+        print(f"    [dbg n{nid}]", *a, flush=True)
+
 import numpy as np
 
-from rig.blockchain import BlockTree, ValidationError, build_block
+from rig.blockchain import Block, BlockTree, ValidationError, build_block
 from rig.chain import dequantize, quantize, state_root
 from rig.crypto import BackpropTx, Key, delta_hash
+from .compress import Compressor, decompress
 from .data import ByteData
 from .gpt import GPTConfig, build
 from .trainer import DiLoCoMiner, flat_params, set_flat_params
+
+KEEP_FRAC = 0.02             # top-k delta compression (50x on the wire)
 
 GOSSIP_CFG = GPTConfig(n_layer=2, n_head=4, n_embd=64, block_size=64)   # small: light gossip
 INNER_STEPS = 10
@@ -58,35 +69,52 @@ class RealCore:
         self.miner = DiLoCoMiner(self.model, self.data, self.device)
         self.key = Key.generate(f"node{node_id}".encode().ljust(32, b"0"))
         self.tree = BlockTree(quantize(flat_params(self.model)))
-        self.mempool, self.seen_tx, self.seen_block, self.orphans = {}, set(), set(), {}
-        self._round = 0
+        self.mempool, self.seen_tx, self.seen_block = {}, set(), set()
+        self.orphans, self.pending = {}, {}       # pending: blocks awaiting bodies
+        self.body_store = {}                      # txid -> dense delta, RETAINED
+        self.payload_store = {}                   # txid -> compressed payload, RETAINED
+        self.comp = Compressor(keep_frac=KEEP_FRAC)
 
     def train_delta(self):
-        """Blocking GPU work — run in an executor so it never stalls gossip."""
+        """Blocking GPU work — kept on the main thread (MPS dislikes threads)."""
         hh = self.tree.blocks[self.tree.head].header.height
         set_flat_params(self.model, dequantize(self.tree.head_state()))
         delta, loss = self.miner.inner_train(INNER_STEPS, BATCH, seed=hh * 100 + self.node_id)
         return hh, delta, loss
 
-    def submit_delta(self, hh, delta, outbox):
-        """Assemble + sign the tx and gossip it (main loop — mutates state)."""
+    def submit_delta(self, hh, delta_int, outbox):
+        """Compress the delta (top-k + error feedback), sign a commitment tx, and
+        gossip only the small payload — the body never rides in a block."""
+        if hh != self.tree.blocks[self.tree.head].header.height:
+            return
+        payload = self.comp.compress(dequantize(delta_int))    # small on the wire
+        dense = decompress(payload)                            # what everyone commits to
         ptr = f"da://{self.key.pub[:8]}/{hh}/{self.node_id}"
         tx = BackpropTx(miner=self.key.pub, base_height=hh, shard_id=self.node_id,
-                        delta_hash=delta_hash(delta.tobytes()), da_pointer=ptr).signed(self.key)
-        if tx.txid() not in self.seen_tx and hh == self.tree.blocks[self.tree.head].header.height:
+                        delta_hash=delta_hash(dense.tobytes()), da_pointer=ptr).signed(self.key)
+        if tx.txid() not in self.seen_tx:
             self.seen_tx.add(tx.txid())
-            self.mempool[tx.txid()] = (tx, delta)
-            outbox.append(("tx", tx, delta.tobytes()))
+            self.mempool[tx.txid()] = (tx, dense)
+            self.body_store[tx.txid()] = dense
+            self.payload_store[tx.txid()] = payload
+            outbox.append(("tx", tx, payload))
 
-    def recv_tx(self, tx, body_bytes, outbox):
-        if tx.txid() in self.seen_tx or not tx.verify():
+    def recv_tx(self, tx, payload, outbox):
+        if tx.txid() in self.seen_tx:
             return
-        body = np.frombuffer(body_bytes, dtype=np.int64).copy()
-        if delta_hash(body.tobytes()) != tx.delta_hash:
+        if not tx.verify():
+            _dbg(self.node_id, f"tx from shard{tx.shard_id} REJECT (bad sig)")
+            return
+        dense = decompress(payload)
+        if delta_hash(dense.tobytes()) != tx.delta_hash:
+            _dbg(self.node_id, f"tx from shard{tx.shard_id} REJECT (hash mismatch)")
             return
         self.seen_tx.add(tx.txid())
-        self.mempool[tx.txid()] = (tx, body)
-        outbox.append(("tx", tx, body_bytes))
+        self.mempool[tx.txid()] = (tx, dense)
+        self.body_store[tx.txid()] = dense
+        self.payload_store[tx.txid()] = payload
+        outbox.append(("tx", tx, payload))
+        self._retry_pending(outbox)                           # a block may now be complete
 
     def propose(self, outbox):
         head = self.tree.head
@@ -98,35 +126,90 @@ class RealCore:
         chosen = cands[:INCLUDE_K]
         accepted = [tx for tx, _ in chosen]
         bodies = {tx.da_pointer: body for tx, body in chosen}
-        works = {tx.txid(): 1.0 for tx, _ in chosen}
-        block = build_block(self.tree, head, accepted, bodies, works, self.key.pub)
+        block = build_block(self.tree, head, accepted, bodies,
+                            {tx.txid(): 1.0 for tx, _ in chosen}, self.key.pub)
         if self.tree.add_block(block):
             self.seen_block.add(block.hash)
             self._prune(block)
-            outbox.append(("block", block))
+            outbox.append(("block", block.header, block.txs))  # commitments only
 
-    def recv_block(self, block, outbox):
-        if block.hash in self.seen_block:
+    def recv_block(self, header, txs, outbox):
+        bh = header.block_hash()
+        if bh in self.seen_block:
             return
+        bodies, missing = {}, False
+        for tx in txs:                                 # rebuild bodies from the RETAINED store
+            if tx.txid() in self.body_store:
+                bodies[tx.da_pointer] = self.body_store[tx.txid()]
+            else:
+                missing = True
+        if missing:
+            self.pending[bh] = (header, txs)           # wait for the tx(s) to arrive
+            outbox.append(("getblock", bh))            # …and request the full block (getdata)
+            return
+        _dbg(self.node_id, f'block h{header.height} bodies-ready, installing')
+        self._install(Block(header, txs, bodies), outbox)
+
+    def serve_block(self, bh, outbox):
+        """Answer a getblock request with a compressed full block if we have it."""
+        b = self.tree.blocks.get(bh)
+        if b is not None and all(tx.txid() in self.payload_store for tx in b.txs):
+            payloads = {tx.txid(): self.payload_store[tx.txid()] for tx in b.txs}
+            outbox.append(("fullblock", b.header, b.txs, payloads))
+
+    def recv_fullblock(self, header, txs, payloads, outbox):
+        """Initial block download / getdata reply: a block plus the COMPRESSED
+        payloads for its txs, so a node that missed the txs can reconstruct the
+        bodies and catch up — small on the wire (payloads, not dense bodies)."""
+        bh = header.block_hash()
+        if bh in self.seen_block:
+            return
+        bodies = {}
+        for tx in txs:
+            dense = decompress(payloads[tx.txid()])
+            if delta_hash(dense.tobytes()) != tx.delta_hash:
+                return
+            self.body_store[tx.txid()] = dense
+            self.payload_store[tx.txid()] = payloads[tx.txid()]
+            bodies[tx.da_pointer] = dense
+        _dbg(self.node_id, f'fullblock h{header.height} received, installing')
+        self._install(Block(header, txs, bodies), outbox)
+
+    def _install(self, block, outbox):
         try:
             self.tree.add_block(block)
         except ValidationError as e:
             if "orphan" in str(e):
-                self.orphans.setdefault(block.header.prev_hash, []).append(block)
+                self.orphans.setdefault(block.header.prev_hash, []).append(
+                    (block.header, block.txs))
+            else:
+                _dbg(self.node_id, f"h{block.header.height} INVALID: {e}")
             return
         self.seen_block.add(block.hash)
-        self._prune(block)
-        outbox.append(("block", block))
-        for child in self.orphans.pop(block.hash, []):
-            self.recv_block(child, outbox)
+        _dbg(self.node_id, f'INSTALLED h{block.header.height}, head=h{self.tree.blocks[self.tree.head].header.height}')
+        self._prune_txs(block.txs)
+        outbox.append(("block", block.header, block.txs))   # relay compact
+        for ch, ct in self.orphans.pop(block.hash, []):
+            self.recv_block(ch, ct, outbox)
+
+    def _retry_pending(self, outbox):
+        for bh, (header, txs) in list(self.pending.items()):
+            if all(tx.txid() in self.body_store for tx in txs):
+                del self.pending[bh]
+                self.recv_block(header, txs, outbox)
 
     def _prune(self, block):
-        for tx in block.txs:
+        self._prune_txs(block.txs)
+
+    def _prune_txs(self, txs):
+        for tx in txs:
             self.mempool.pop(tx.txid(), None)
 
     def rebroadcast(self, outbox):
         for b in self.tree.chain_from_genesis():
-            outbox.append(("block", b))
+            if all(tx.txid() in self.payload_store for tx in b.txs):
+                payloads = {tx.txid(): self.payload_store[tx.txid()] for tx in b.txs}
+                outbox.append(("fullblock", b.header, b.txs, payloads))
 
     def val_loss(self):
         set_flat_params(self.model, dequantize(self.tree.head_state()))
@@ -139,20 +222,32 @@ class GossipNode:
         self.host, self.port, self.peers, self.n_total = host, port, peers, n_total
         self.interval, self.t0 = interval, t0 or time.time()
         self.writers = set()
+        self.peer_ids = set()             # dedup: at most one connection per peer
         self._stop = asyncio.Event()
 
     async def _peer(self, reader, writer):
+        await _send(writer, ("hello", self.core.node_id))
+        try:
+            hello = await _recv(reader)
+            pid = hello[1] if hello and hello[0] == "hello" else None
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            writer.close(); return
+        if pid in self.peer_ids:          # already connected to this peer — drop the dup
+            writer.close(); return
+        if pid is not None:
+            self.peer_ids.add(pid)
         self.writers.add(writer)
         try:
-            await _send(writer, ("hello", self.core.node_id))
             for b in self.core.tree.chain_from_genesis():
-                await _send(writer, ("block", b))
+                if all(tx.txid() in self.core.payload_store for tx in b.txs):
+                    pl = {tx.txid(): self.core.payload_store[tx.txid()] for tx in b.txs}
+                    await _send(writer, ("fullblock", b.header, b.txs, pl))
             while not self._stop.is_set():
                 self._handle(await _recv(reader))
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:
-            self.writers.discard(writer); writer.close()
+            self.writers.discard(writer); self.peer_ids.discard(pid); writer.close()
 
     async def _dial(self, host, port):
         for _ in range(60):
@@ -165,9 +260,13 @@ class GossipNode:
     def _handle(self, msg):
         outbox = []
         if msg[0] == "tx":
-            self.core.recv_tx(msg[1], msg[2], outbox)
+            self.core.recv_tx(msg[1], msg[2], outbox)          # (tx, payload)
         elif msg[0] == "block":
-            self.core.recv_block(msg[1], outbox)
+            self.core.recv_block(msg[1], msg[2], outbox)       # (header, txs) — compact
+        elif msg[0] == "fullblock":
+            self.core.recv_fullblock(msg[1], msg[2], msg[3], outbox)   # (header,txs,payloads)
+        elif msg[0] == "getblock":
+            self.core.serve_block(msg[1], outbox)              # peer needs a full block
         for m in outbox:
             self._bcast(m)
 
@@ -215,6 +314,8 @@ class GossipNode:
                 d.cancel()
         h = self.core.tree.blocks[self.core.tree.head].header.height
         print(f"node {self.core.node_id} done — height {h}, head {self.core.tree.head[:16]}, "
+              f"seen_tx {len(self.core.seen_tx)} seen_block {len(self.core.seen_block)} "
+              f"pending {len(self.core.pending)} peers {len(self.writers)}, "
               f"val loss {self.core.val_loss():.3f}", flush=True)
 
 
