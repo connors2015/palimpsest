@@ -75,6 +75,8 @@ The chain's state at height N is **W_N**: the full parameter set of the network'
 - Any node can prove it holds the correct page i of W_N with a Merkle path — partial verification without holding the full model.
 - "Which model produced this output?" has a canonical, chain-native answer: the state root in the block header (§8).
 
+**Invariant: the chain's interface is bytes.** The model consumes and emits raw bytes (vocabulary = 256, defined by physics, forever); there is no tokenizer. This is a decided, permanent commitment, not a placeholder. Rationale: (1) a tokenizer would be consensus-critical infrastructure — a version mismatch is a silent fork, and its vocabulary a frozen governance artifact whose replacement is a hard fork plus a full retrain, since weights do not migrate across vocabularies; (2) BPE vocabularies embed the linguistic bias of their training corpus into the *payment layer* — the same sentence costs 2–4× more tokens in most non-English languages, structurally underpaying their data contributors, which a per-byte meter avoids; (3) bytes are universal — code, any language, binary formats, genomic data — so nothing the data economy (§9A) admits is ever out-of-vocabulary. The known ~4× compute penalty of naive byte-level modeling is a *model-architecture* cost, not a data-format law: dynamic byte-patching architectures (MegaByte, Byte Latent Transformer) recover BPE-class efficiency inside the model — and on this chain the model is the one component that is upgradeable by construction, while the data format is the one that must never change. BPE fixes efficiency in the data format; patching architectures fix it in the model; only the model is upgradeable on-chain.
+
 ### 3.2 Block anatomy
 
 ```
