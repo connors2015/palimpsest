@@ -1,0 +1,102 @@
+# The Genesis Ceremony
+
+How the real Palimpsest network is born. Everything here is decided, published,
+and verifiable **before** block 1 exists — credibility is set at launch and
+cannot be retrofitted (WHITEPAPER §9.8). This document is the checklist and the
+script; each item names the mechanism that already implements it.
+
+## 0. Principles (all already protocol invariants)
+
+- **From scratch, on-chain.** Genesis weights are a deterministic random
+  initialization from a *public seed* — no pretrained artifact anyone must
+  trust. Every parameter of the model is thereafter explainable as a sum of
+  signed, attributed, replayable deltas (§3.1).
+- **Fair launch.** The genesis ledger has **zero balances**. No premine, no
+  pre-sale, no allocation. Every grain is minted by a block reward for
+  verifiable work (`rig/token.py`, mirrored bit-exact in `node/core`).
+- **Bytes forever; RoPE positions.** Vocabulary = 256; no tokenizer; no learned
+  position table — context is a runtime/market choice (§3.1).
+- **The founding corpus is a contribution, not a gift.** It enters as registry
+  entry zero owned by the founder's wallet at a published weight, earning the
+  data share under exactly the rules any later contributor faces — including
+  challengeability (§7.2 challenge market).
+
+## 1. Published launch parameters (the genesis file)
+
+A single JSON document, hashed and pinned, containing:
+
+| Parameter | Value at ceremony | Where enforced |
+|---|---|---|
+| `model_config` | layers / heads / width / training block size | `client/gpt.py` GPTConfig |
+| `genesis_seed` | derived from a public randomness beacon (below) | `apply_genesis` (numpy, version-independent) |
+| `genesis_state_root` | sha256 of the quantized genesis vector | `rig/chain.state_root` — anyone recomputes |
+| `emission` | BASE_REWARD, HALVING_BLOCKS, SUNSET_HEIGHT | `rig/token.py` / `node/core/token.rs` |
+| `reward_split` | 7000/1000/2000 bps miners/proposer/data | same |
+| `challenge_params` | CHALLENGE_WINDOW, PROPOSER_LOOKBACK | same |
+| `data_contributor` | founder wallet address | genesis registry entry zero |
+| `genesis_data_weight` | GENESIS_DATA_WEIGHT | same |
+| `founding_corpus_hash` | sha256 of the corpus file(s) | registry entry `data_hash`; corpus pinned on the CAS/DA layer |
+| `block_interval` | seconds per round | node config |
+| `bootstrap_peers` | seed-node multiaddrs | node config |
+
+**Rule: any change to this table after ceremony is a hard fork by definition.**
+
+## 2. Seed derivation — nobody chooses the genesis weights
+
+`genesis_seed = sha256("palimpsest-genesis" || drand_round_R_signature)` where
+`R` is a **pre-announced future round** of the drand public randomness beacon
+(the League of Entropy). Because `R` is announced before its value exists,
+neither the team nor anyone else can grind the initialization. Anyone can
+verify: fetch round `R`, hash, compare. (`apply_genesis` then expands the seed
+with numpy's byte-stable RNG, so the same seed yields bit-identical weights on
+every platform — already verified cross-machine MPS/CUDA/CPU.)
+
+## 3. The founding wallet
+
+- Generated **fresh, offline**, on a machine the founder trusts
+  (`python -m client.wallet new` on an air-gapped box; the dev wallet used
+  during testnet is retired). Mnemonic backup written down; encrypted wallet
+  file backed up separately (see wallet hardening).
+- Only the **address** enters the genesis file. The key never touches a server.
+
+## 4. The founding data transaction
+
+The corpus enters through the standard admission path, visible in block 1's
+lineage: registry entry zero (`seed_genesis_data`) carries the founder's
+address, the corpus content hash, and the published weight. The corpus bytes
+are pinned content-addressed (CAS/Bitswap — `client/cas.py`; the DA layer at
+scale) so any node can fetch and hash-check exactly what the model eats.
+It is **challengeable like any entry** (validity or ownership, §7.2) — the
+founder holds no special immunity.
+
+## 5. Ceremony procedure (the runbook)
+
+1. **T−7 days**: publish the genesis file *minus* `genesis_seed` /
+   `genesis_state_root`, naming drand round `R`. Publish repo tag, binary
+   checksums, seed-node addresses.
+2. **T−0**: drand round `R` lands. Anyone (including us) computes
+   `genesis_seed`, runs `apply_genesis`, publishes `genesis_state_root`.
+   Independent parties confirm the root.
+3. **Launch**: seed nodes + founder nodes start with the complete genesis file.
+   Block 1 is mined by whoever gets there first — emissions begin, the founding
+   registry entry starts earning its weighted data share.
+4. **T+window**: the founding corpus sits in its public challenge window like
+   any submission.
+
+## 6. Preconditions before the ceremony can run
+
+- [ ] Legal counsel on the token (founder action — hard blocker)
+- [ ] External audit of consensus + ledger (rig is the spec; `node/core` golden-vector-pinned)
+- [ ] NAT traversal live (AutoNAT/DCUtR/relay-v2 on the Rust node) so volunteers can join
+- [ ] Wallet hardening shipped (encrypted files, mnemonics, checksummed addresses)
+- [ ] Real corpus decision + license posture for the founding data
+- [ ] Repo public; binaries reproducibly built and checksummed
+
+## 7. What the testnet already rehearsed
+
+Every mechanism above is running today on the internal testnet: from-scratch
+genesis with a published seed (1337), the founder wallet earning the data share
+per block, transfers and data-lane txs settling through `ledger_root`, the
+seed node on the cluster, and the Rust devnet converging byte-identically.
+The ceremony is those same steps with a beacon-derived seed, a fresh wallet,
+the real corpus, and the world watching.
