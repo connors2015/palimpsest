@@ -760,8 +760,345 @@
    "n_txs": 2,
    "work": 1500,
    "proposer": "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
-   "canonical_json": "{\"height\": 5, \"n_txs\": 2, \"prev_hash\": \"abababababababababababababababababababababababababababababababab\", \"proposer\": \"e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64\", \"state_root\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\", \"txset_root\": \"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\", \"work\": 1500}",
-   "hash": "1b250705bbf736f77f69f016e876fe4b08530b29c7470951a24849a12e868534"
+   "transfer_root": "1212121212121212121212121212121212121212121212121212121212121212",
+   "ledger_root": "3434343434343434343434343434343434343434343434343434343434343434",
+   "canonical_json": "{\"height\": 5, \"ledger_root\": \"3434343434343434343434343434343434343434343434343434343434343434\", \"n_txs\": 2, \"prev_hash\": \"abababababababababababababababababababababababababababababababab\", \"proposer\": \"e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64\", \"state_root\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\", \"transfer_root\": \"1212121212121212121212121212121212121212121212121212121212121212\", \"txset_root\": \"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\", \"work\": 1500}",
+   "hash": "745c0f3a0bac917c0060a4b5c8a304925572bc032bcae0d9267ae5aa5fe87db8"
+  }
+ ],
+ "address": [
+  {
+   "pub_hex": "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
+   "address": "887a5a8e7af4e2bfc47925a786215ac007297ab8"
+  }
+ ],
+ "emission": [
+  {
+   "height": 0,
+   "reward": 0
+  },
+  {
+   "height": 1,
+   "reward": 50000000000
+  },
+  {
+   "height": 100000,
+   "reward": 50000000000
+  },
+  {
+   "height": 100001,
+   "reward": 25000000000
+  },
+  {
+   "height": 200001,
+   "reward": 12500000000
+  },
+  {
+   "height": 1000000,
+   "reward": 0
+  }
+ ],
+ "ledger": [
+  {
+   "miners": [
+    "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
+    "fcec01c849932a729a69f63eb817435e242318866bf4bcdece6538b548c9f037"
+   ],
+   "proposer": "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
+   "data_addrs": [
+    "fe938c98d090c4d9a0ed25d779c2172c12fcd8d3"
+   ],
+   "height": 1,
+   "root_after_reward": "4c1d057b94fd15362fe6d5ab98323ca309279080cce00ac294b4e39cea1dcecd",
+   "transfer": {
+    "from_pub": "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
+    "to_addr": "fe938c98d090c4d9a0ed25d779c2172c12fcd8d3",
+    "amount": 11250000000,
+    "nonce": 0,
+    "signing_bytes_hex": "7472616e736665727c653266316131643266363237363630313662313461646635386233656236343834633531636561333163623334646339323635396464663738336639346136347c666539333863393864303930633464396130656432356437373963323137326331326663643864337c31313235303030303030307c30",
+    "txid": "cae5c0d746a68bf95f6e38805b095f120f7b11dd8fba808b18f1b2e57a8f2719",
+    "sig_hex": "313d85dc8317d8cb1f068c76565c865687d14fd23c6a516e4a4f0c91bf7c6f07068cb30c8aa9b383281db28c5aadf5d653e3064c4dd7aa3f7e2caa9a88a2570f"
+   },
+   "root_after_transfer": "96c67a070d2dd16a56fb99843e30609c34f0f576047d048f180ebf32279f5bc3",
+   "balances": {
+    "887a5a8e7af4e2bfc47925a786215ac007297ab8": 11250000000,
+    "fe938c98d090c4d9a0ed25d779c2172c12fcd8d3": 38750000000
+   },
+   "transfer_root": "6e0f56a81cbf433592b041df781381c3dc821d61063afbe61ac4625ea5ecb967"
+  }
+ ],
+ "chain_replay": [
+  {
+   "genesis_w": [
+    -35309,
+    75223,
+    -156910,
+    -51548,
+    -110524,
+    -54148,
+    16231,
+    -11746,
+    -16605,
+    -10432,
+    13329,
+    -66095,
+    46324,
+    43428,
+    25234,
+    36473
+   ],
+   "data_contributor": "c5f9952582d901f88ea3e554f5bfd40dbd496b11",
+   "blocks": [
+    {
+     "parent": "24b455da780a8a492302d1e5a75fb34499c8e3e9ad122af05212943e2a08809d",
+     "hash": "1d1230cac5d2d2726dcdfd1021b90d3676a57075cdba325d0f434d821bb90274",
+     "header": {
+      "height": 1,
+      "prev_hash": "24b455da780a8a492302d1e5a75fb34499c8e3e9ad122af05212943e2a08809d",
+      "state_root": "2db1e1a24610d4f285884bec4e5803fc4219d77f421f65aa1334b041041fba3c",
+      "txset_root": "8b4f4e9fdc6506f7179ae0027ec4eeb4b209140deaf59567f57be236c84bbc58",
+      "n_txs": 2,
+      "work": 2000,
+      "proposer": "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+      "transfer_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ledger_root": "38bec56fe2b379a92729190de924f2625c00bcd1645d5d679728d51e221c1742"
+     },
+     "txs": [
+      {
+       "miner": "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+       "base_height": 0,
+       "shard_id": 0,
+       "delta_hash": "911af03623b73ed9025da2a0c6798f43e157d6ee5f8eacb93b58c624afbf865f",
+       "da_pointer": "da://911af03623b73ed9025da2a0c6798f43e157d6ee5f8eacb93b58c624afbf865f",
+       "sig_hex": "6276ec026ae2397dd8f5205676264960473202a17a29dcf12bdafd8b6f440a64bd6f33a5ee305c62c025e2f0f8500f6abe9fd134cdfce400f6c8125e4b67c40f"
+      },
+      {
+       "miner": "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+       "base_height": 0,
+       "shard_id": 1,
+       "delta_hash": "e603e28b6408b492d96e5343528315d92152e249841b18c739f8b709182b421b",
+       "da_pointer": "da://e603e28b6408b492d96e5343528315d92152e249841b18c739f8b709182b421b",
+       "sig_hex": "3f13c9d93560364f8bbeb998ad52f9c3b04d811a456ab99d05c6c01ed8c909e469a5c15c073bbf6edd1a10fa31e2c2991fd10d106c7fc6ecf27d09097aa8f20d"
+      }
+     ],
+     "bodies": {
+      "da://911af03623b73ed9025da2a0c6798f43e157d6ee5f8eacb93b58c624afbf865f": [
+       1943,
+       13337,
+       -571,
+       -2013,
+       -4938,
+       -6765,
+       -8156,
+       -5825,
+       -463,
+       2191,
+       335,
+       -5017,
+       5899,
+       4846,
+       -1046,
+       -4279
+      ],
+      "da://e603e28b6408b492d96e5343528315d92152e249841b18c739f8b709182b421b": [
+       3594,
+       1232,
+       -9490,
+       -446,
+       1717,
+       -5896,
+       1244,
+       -9534,
+       8757,
+       8179,
+       -1655,
+       2382,
+       -15794,
+       -7578,
+       -1925,
+       -7026
+      ]
+     },
+     "transfers": []
+    },
+    {
+     "parent": "1d1230cac5d2d2726dcdfd1021b90d3676a57075cdba325d0f434d821bb90274",
+     "hash": "c88dfff0753aabd8c857d8efbc30e4a204e997a7a6ae57e70ce8ca24afdcf8ff",
+     "header": {
+      "height": 2,
+      "prev_hash": "1d1230cac5d2d2726dcdfd1021b90d3676a57075cdba325d0f434d821bb90274",
+      "state_root": "096cafae2cac860ea5db7570013d19c5c2dccb97c61c71e0e6146634411d53a9",
+      "txset_root": "cf30056bd974cb4b5575063e0c888105fffcea4e5ba1229418001457e2b5ab5b",
+      "n_txs": 1,
+      "work": 1000,
+      "proposer": "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+      "transfer_root": "4eeca87b8bb5dc504503a202fb7ab6fe289ccdf1f796465eb8c7917361467144",
+      "ledger_root": "7deba38e5029c2e457a3ab96b2fe0ca68d93dd39af8a20d3888ced98678113ba"
+     },
+     "txs": [
+      {
+       "miner": "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+       "base_height": 1,
+       "shard_id": 0,
+       "delta_hash": "912f694162c69eb6a27effad6dad9c1627bb16ef62750807aff1fbd0ef50447e",
+       "da_pointer": "da://912f694162c69eb6a27effad6dad9c1627bb16ef62750807aff1fbd0ef50447e",
+       "sig_hex": "697b0bd5615c2de64ab6c8a810095b60a9944c5f3fdb2982e4cf9e007341e87c520b2848231f456012e63719a9d3102764970b4569d0caed6f5c7416e4483a08"
+      }
+     ],
+     "bodies": {
+      "da://912f694162c69eb6a27effad6dad9c1627bb16ef62750807aff1fbd0ef50447e": [
+       4682,
+       13089,
+       -7711,
+       -5488,
+       1543,
+       10559,
+       -8011,
+       1632,
+       11936,
+       -10825,
+       -8396,
+       -2776,
+       -3412,
+       5325,
+       1584,
+       -11632
+      ]
+     },
+     "transfers": [
+      {
+       "from_pub": "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+       "to_addr": "33fa9b16719306d2b5b2062fa7502cbc12ab3be3",
+       "amount": 5625000000,
+       "nonce": 0,
+       "sig_hex": "c5b3ce2ed968bbab4e8d8166cbe4aca17ccb6389339184593a319edbec2d2de009857803ed60ee9c48b0c77421ec192be7d80363810c3b25cf643819238be70c"
+      }
+     ]
+    },
+    {
+     "parent": "1d1230cac5d2d2726dcdfd1021b90d3676a57075cdba325d0f434d821bb90274",
+     "hash": "7bd117b3d6a95754dfb0379f4063ab9f82db4bc4ce877e5432204248583085aa",
+     "header": {
+      "height": 2,
+      "prev_hash": "1d1230cac5d2d2726dcdfd1021b90d3676a57075cdba325d0f434d821bb90274",
+      "state_root": "6adba3211a8951f6151de33cf10b9557a8e52677ab71669422fb5ed0f348683d",
+      "txset_root": "cd12ba2f1e087ec23755ca22a2d81189ae55c9e6e01b7eeadd152cdf698d4db8",
+      "n_txs": 1,
+      "work": 1000,
+      "proposer": "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+      "transfer_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ledger_root": "49b9765349befb953d57bebfa4be67e5364cd19b55dfc8f19d6fe4698626e156"
+     },
+     "txs": [
+      {
+       "miner": "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+       "base_height": 1,
+       "shard_id": 0,
+       "delta_hash": "abb85334420a0e9421b14ada6eb953cb64eb71901505b8e7276e5f9373e1acc4",
+       "da_pointer": "da://abb85334420a0e9421b14ada6eb953cb64eb71901505b8e7276e5f9373e1acc4",
+       "sig_hex": "d37ddb36dd602888b9e2b8af9a9f01825c3934dd00f3e088f9341e8fad1eb2ce1e4beabb7a7bfa37f89edd120c705c0d337671bd81a0ac777e4a9f8144060301"
+      }
+     ],
+     "bodies": {
+      "da://abb85334420a0e9421b14ada6eb953cb64eb71901505b8e7276e5f9373e1acc4": [
+       3378,
+       -3785,
+       8352,
+       -4113,
+       -4172,
+       3546,
+       5000,
+       2937,
+       -11047,
+       3526,
+       -6778,
+       1542,
+       -9331,
+       2925,
+       -5286,
+       -8406
+      ]
+     },
+     "transfers": []
+    },
+    {
+     "parent": "c88dfff0753aabd8c857d8efbc30e4a204e997a7a6ae57e70ce8ca24afdcf8ff",
+     "hash": "0c3e1ad46cb9a1384917e85a7e80e94664145ac7635140b0dde19870ea96810a",
+     "header": {
+      "height": 3,
+      "prev_hash": "c88dfff0753aabd8c857d8efbc30e4a204e997a7a6ae57e70ce8ca24afdcf8ff",
+      "state_root": "29db62e74bb10bdc9fa544216639fe826e600079f378f9bae301b749edc0835a",
+      "txset_root": "7a06b56c05cb27c5283f27eee477ba6e3c465126e1bd11d09d53bfe72a7c59f5",
+      "n_txs": 2,
+      "work": 2000,
+      "proposer": "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+      "transfer_root": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ledger_root": "66303fffcb6cc596f7b1d7c60107a70be7188a0f62e92604348cf2269b07b0e5"
+     },
+     "txs": [
+      {
+       "miner": "c74fa57d749ec00bea5c197f59a82fd3d47c67c89e02f0625058cb9394a313f6",
+       "base_height": 2,
+       "shard_id": 0,
+       "delta_hash": "0fe62263ae52534c75896394279bda124652cf85df470e04f15b88f7828b48a5",
+       "da_pointer": "da://0fe62263ae52534c75896394279bda124652cf85df470e04f15b88f7828b48a5",
+       "sig_hex": "7bc258363575bdf4f8a3d2a42a8381cc3a80b1d24ca64f9982d59afd1bba009f7d1948f2c1729d9483142173afb8d57958f06b4f64f7c5c9ec670c0f4e3ea00d"
+      },
+      {
+       "miner": "323157b101d0d7c712af9f6bf25513f8e74ed35cf1ff9b5245c9bf8325793af1",
+       "base_height": 2,
+       "shard_id": 1,
+       "delta_hash": "9a47231216b18c26c06eef8bac4741a3e38735761d87619008e9fc44faf5c58f",
+       "da_pointer": "da://9a47231216b18c26c06eef8bac4741a3e38735761d87619008e9fc44faf5c58f",
+       "sig_hex": "6f99083d22a130693dc4bdf5891e96dffdd87a9c2f56bdecd025b12b54192a47a0ea4b56edb7383b92f86dcff1a346d673ab5bab78d74d53cf50de730a39a309"
+      }
+     ],
+     "bodies": {
+      "da://0fe62263ae52534c75896394279bda124652cf85df470e04f15b88f7828b48a5": [
+       4678,
+       1584,
+       -4024,
+       9510,
+       -2888,
+       210,
+       1762,
+       -4061,
+       3088,
+       -3496,
+       -2698,
+       8930,
+       -6820,
+       -15812,
+       10557,
+       16707
+      ],
+      "da://9a47231216b18c26c06eef8bac4741a3e38735761d87619008e9fc44faf5c58f": [
+       -2656,
+       -12693,
+       -2035,
+       -1876,
+       -1245,
+       -7297,
+       3798,
+       3437,
+       -9794,
+       4582,
+       13452,
+       1127,
+       -2211,
+       -931,
+       4032,
+       -11342
+      ]
+     },
+     "transfers": []
+    }
+   ],
+   "expected_head": "0c3e1ad46cb9a1384917e85a7e80e94664145ac7635140b0dde19870ea96810a",
+   "expected_head_height": 3,
+   "expected_state_root": "29db62e74bb10bdc9fa544216639fe826e600079f378f9bae301b749edc0835a",
+   "expected_ledger_root": "66303fffcb6cc596f7b1d7c60107a70be7188a0f62e92604348cf2269b07b0e5",
+   "expected_supply": 150000000000
   }
  ]
 }

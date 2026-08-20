@@ -107,20 +107,120 @@ fn txset_root_matches_reference() {
     }
 }
 
+fn header_from(case: &Value) -> core::Header {
+    core::Header {
+        height: case["height"].as_u64().unwrap(),
+        prev_hash: case["prev_hash"].as_str().unwrap().into(),
+        state_root: case["state_root"].as_str().unwrap().into(),
+        txset_root: case["txset_root"].as_str().unwrap().into(),
+        n_txs: case["n_txs"].as_u64().unwrap(),
+        work: case["work"].as_u64().unwrap(),
+        proposer: case["proposer"].as_str().unwrap().into(),
+        transfer_root: case["transfer_root"].as_str().unwrap_or("").into(),
+        ledger_root: case["ledger_root"].as_str().unwrap_or("").into(),
+    }
+}
+
 #[test]
 fn header_hash_matches_reference() {
     for case in vectors()["header"].as_array().unwrap() {
-        let h = core::Header {
-            height: case["height"].as_u64().unwrap(),
-            prev_hash: case["prev_hash"].as_str().unwrap().into(),
-            state_root: case["state_root"].as_str().unwrap().into(),
-            txset_root: case["txset_root"].as_str().unwrap().into(),
-            n_txs: case["n_txs"].as_u64().unwrap(),
-            work: case["work"].as_u64().unwrap(),
-            proposer: case["proposer"].as_str().unwrap().into(),
-        };
+        let h = header_from(case);
         assert_eq!(h.canonical_json(), case["canonical_json"].as_str().unwrap(),
                    "canonical JSON must match python json.dumps(sort_keys=True)");
         assert_eq!(h.block_hash(), case["hash"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn address_and_emission_match_reference() {
+    use palimpsest_core::token;
+    for case in vectors()["address"].as_array().unwrap() {
+        assert_eq!(token::address(case["pub_hex"].as_str().unwrap()),
+                   case["address"].as_str().unwrap());
+    }
+    for case in vectors()["emission"].as_array().unwrap() {
+        assert_eq!(token::emission(case["height"].as_u64().unwrap()),
+                   case["reward"].as_u64().unwrap(),
+                   "emission schedule mismatch at height {}", case["height"]);
+    }
+}
+
+fn transfer_from(t: &Value) -> palimpsest_core::token::TransferTx {
+    palimpsest_core::token::TransferTx {
+        from_pub: t["from_pub"].as_str().unwrap().into(),
+        to_addr: t["to_addr"].as_str().unwrap().into(),
+        amount: t["amount"].as_u64().unwrap(),
+        nonce: t["nonce"].as_u64().unwrap(),
+        sig: hex::decode(t["sig_hex"].as_str().unwrap()).unwrap(),
+    }
+}
+
+#[test]
+fn ledger_matches_reference() {
+    use palimpsest_core::token::{self, TokenLedger};
+    for case in vectors()["ledger"].as_array().unwrap() {
+        let miners: Vec<String> = case["miners"].as_array().unwrap()
+            .iter().map(|x| x.as_str().unwrap().to_string()).collect();
+        let data: Vec<String> = case["data_addrs"].as_array().unwrap()
+            .iter().map(|x| x.as_str().unwrap().to_string()).collect();
+        let mut led = TokenLedger::new();
+        led.apply_reward(case["height"].as_u64().unwrap(), &miners,
+                         case["proposer"].as_str().unwrap(), &data);
+        assert_eq!(led.root(), case["root_after_reward"].as_str().unwrap(),
+                   "reward split / ledger-root serialization mismatch");
+        let tx = transfer_from(&case["transfer"]);
+        assert_eq!(hex::encode(tx.signing_bytes()),
+                   case["transfer"]["signing_bytes_hex"].as_str().unwrap());
+        assert_eq!(tx.txid(), case["transfer"]["txid"].as_str().unwrap());
+        assert!(led.apply_transfer(&tx), "reference transfer must apply");
+        assert_eq!(led.root(), case["root_after_transfer"].as_str().unwrap());
+        assert_eq!(token::transfer_root(&[tx]),
+                   case["transfer_root"].as_str().unwrap());
+        for (addr, bal) in case["balances"].as_object().unwrap() {
+            assert_eq!(led.balance(addr), bal.as_u64().unwrap());
+        }
+    }
+}
+
+#[test]
+fn full_chain_replay_matches_reference() {
+    use palimpsest_core::blocktree::{Block, BlockTree};
+    use std::collections::HashMap;
+    for case in vectors()["chain_replay"].as_array().unwrap() {
+        let genesis_w = i64s(&case["genesis_w"]);
+        let mut tree = BlockTree::new(
+            genesis_w, Some(case["data_contributor"].as_str().unwrap().into()));
+        for b in case["blocks"].as_array().unwrap() {
+            let header = header_from(&b["header"]);
+            assert_eq!(header.block_hash(), b["hash"].as_str().unwrap(),
+                       "header serialization drift");
+            let txs: Vec<core::BackpropTx> = b["txs"].as_array().unwrap().iter()
+                .map(|t| core::BackpropTx {
+                    miner: t["miner"].as_str().unwrap().into(),
+                    base_height: t["base_height"].as_u64().unwrap(),
+                    shard_id: t["shard_id"].as_u64().unwrap(),
+                    delta_hash: t["delta_hash"].as_str().unwrap().into(),
+                    da_pointer: t["da_pointer"].as_str().unwrap().into(),
+                    sig: hex::decode(t["sig_hex"].as_str().unwrap()).unwrap(),
+                }).collect();
+            let bodies: HashMap<String, Vec<i64>> = b["bodies"].as_object().unwrap()
+                .iter().map(|(k, v)| (k.clone(), i64s(v))).collect();
+            let transfers = b["transfers"].as_array().unwrap()
+                .iter().map(transfer_from).collect();
+            // full first-principles validation: sigs, DA hashes, state transition,
+            // txset/transfer/ledger roots — then fork choice
+            tree.add_block(Block { header, txs, bodies, transfers })
+                .expect("reference block must validate");
+        }
+        assert_eq!(tree.head, case["expected_head"].as_str().unwrap(),
+                   "fork choice disagrees with reference");
+        assert_eq!(core::state_root(tree.head_state()),
+                   case["expected_state_root"].as_str().unwrap());
+        assert_eq!(tree.head_ledger().root(),
+                   case["expected_ledger_root"].as_str().unwrap());
+        assert_eq!(tree.head_ledger().supply(),
+                   case["expected_supply"].as_u64().unwrap());
+        assert_eq!(tree.blocks[&tree.head].height,
+                   case["expected_head_height"].as_u64().unwrap());
     }
 }

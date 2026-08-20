@@ -12,10 +12,18 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+pub mod blocktree;
+pub mod token;
+
 pub const SCALE: f64 = 65536.0; // 1 << 16 fixed-point scale
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// Public alias (module consumers need the genesis txset hash).
+pub fn sha256_hex_pub(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
 }
 
 /// Float delta -> int64 fixed-point. numpy's np.round rounds half to even.
@@ -166,18 +174,22 @@ pub struct Header {
     pub n_txs: u64,
     pub work: u64,
     pub proposer: String,
+    pub transfer_root: String, // rev 2: commitment to the transfer set
+    pub ledger_root: String,   // rev 2: token ledger AFTER this block
 }
 
 impl Header {
     /// The canonical serialization is Python's `json.dumps(dict, sort_keys=True)`
     /// with default separators (", " and ": "), keys in lexicographic order:
-    /// height, n_txs, prev_hash, proposer, state_root, txset_root, work.
-    /// Values here are hex strings and ints, so no JSON string escaping arises.
+    /// height, ledger_root, n_txs, prev_hash, proposer, state_root,
+    /// transfer_root, txset_root, work. Values are hex strings and ints, so no
+    /// JSON string escaping arises.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"height\": {}, \"n_txs\": {}, \"prev_hash\": \"{}\", \"proposer\": \"{}\", \"state_root\": \"{}\", \"txset_root\": \"{}\", \"work\": {}}}",
-            self.height, self.n_txs, self.prev_hash, self.proposer,
-            self.state_root, self.txset_root, self.work
+            "{{\"height\": {}, \"ledger_root\": \"{}\", \"n_txs\": {}, \"prev_hash\": \"{}\", \"proposer\": \"{}\", \"state_root\": \"{}\", \"transfer_root\": \"{}\", \"txset_root\": \"{}\", \"work\": {}}}",
+            self.height, self.ledger_root, self.n_txs, self.prev_hash,
+            self.proposer, self.state_root, self.transfer_root,
+            self.txset_root, self.work
         )
     }
 

@@ -24,9 +24,11 @@ import os
 import numpy as np
 
 from client.compress import compress, decompress
-from rig.blockchain import Header, txset_root
+from rig.blockchain import BlockTree, Header, build_block, txset_root
 from rig.chain import dequantize, quantize, state_root, trimmed_mean_int
 from rig.crypto import BackpropTx, Key, delta_hash
+from rig.token import (TokenLedger, TransferTx, address, canonical_transfers,
+                       emission, transfer_root)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "node", "vectors", "golden.json")
@@ -108,14 +110,104 @@ def main():
 
     # --- header hash: python json.dumps(sort_keys=True) byte format -----------
     h = Header(height=5, prev_hash="ab" * 32, state_root="cd" * 32,
-               txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub)
+               txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub,
+               transfer_root="12" * 32, ledger_root="34" * 32)
     v["header"] = [{
         "height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
         "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
-        "proposer": h.proposer,
+        "proposer": h.proposer, "transfer_root": h.transfer_root,
+        "ledger_root": h.ledger_root,
         "canonical_json": json.dumps(h.__dict__, sort_keys=True),
         "hash": h.block_hash(),
     }]
+
+    # --- token: address derivation + emission schedule ------------------------
+    v["address"] = [{"pub_hex": key.pub, "address": address(key.pub)}]
+    v["emission"] = [{"height": hh, "reward": emission(hh)}
+                     for hh in (0, 1, 100_000, 100_001, 200_001, 1_000_000)]
+
+    # --- token: reward split + transfer apply + canonical ledger root ---------
+    k2 = Key.generate(b"golden-vector-seed-second-key-0!")
+    led = TokenLedger()
+    led.apply_reward(1, [key.pub, k2.pub], key.pub, [address(k2.pub)])
+    root_after_reward = led.root()
+    xfer = TransferTx(from_pub=key.pub, to_addr=address(k2.pub),
+                      amount=led.balance(address(key.pub)) // 2, nonce=0).signed(key)
+    assert led.apply_transfer(xfer)
+    v["ledger"] = [{
+        "miners": [key.pub, k2.pub], "proposer": key.pub,
+        "data_addrs": [address(k2.pub)], "height": 1,
+        "root_after_reward": root_after_reward,
+        "transfer": {"from_pub": xfer.from_pub, "to_addr": xfer.to_addr,
+                     "amount": xfer.amount, "nonce": xfer.nonce,
+                     "signing_bytes_hex": xfer.signing_bytes().hex(),
+                     "txid": xfer.txid(), "sig_hex": xfer.sig.hex()},
+        "root_after_transfer": led.root(),
+        "balances": dict(sorted(led.balances.items())),
+        "transfer_root": transfer_root([xfer]),
+    }]
+
+    # --- FULL-CHAIN REPLAY: a mini chain with a fork and settled transfers ----
+    # Rust must rebuild every block, validate it completely (sigs, state
+    # transition, txset/transfer/ledger roots), run fork choice, and land on the
+    # same head with the same roots.
+    dim = 16
+    genesis_w = quantize(rng.standard_normal(dim))
+    m0, m1 = Key.generate(b"chain-miner-0" + b"0" * 19), Key.generate(b"chain-miner-1" + b"0" * 19)
+    founder = address(Key.generate(b"chain-founder" + b"0" * 19).pub)
+    tree = BlockTree(genesis_w, data_contributor=founder)
+
+    def mk_tx(miner_key, height, shard, delta):
+        dh = delta_hash(delta.tobytes())
+        return BackpropTx(miner=miner_key.pub, base_height=height, shard_id=shard,
+                          delta_hash=dh, da_pointer=f"da://{dh}").signed(miner_key)
+
+    blocks_out = []
+
+    def add(parent, miner_keys, proposer_key, transfers=()):
+        hh = tree.blocks[parent].header.height
+        txs, bodies = [], {}
+        for s, mk in enumerate(miner_keys):
+            d = quantize(rng.standard_normal(dim) * 0.1)
+            tx = mk_tx(mk, hh, s, d)
+            txs.append(tx); bodies[tx.da_pointer] = d
+        blk = build_block(tree, parent, txs, bodies,
+                          {t.txid(): 1.0 for t in txs}, proposer_key.pub,
+                          transfers=list(transfers))
+        tree.add_block(blk)
+        blocks_out.append({
+            "parent": parent, "hash": blk.hash,
+            "header": dict(blk.header.__dict__),
+            "txs": [{"miner": t.miner, "base_height": t.base_height,
+                     "shard_id": t.shard_id, "delta_hash": t.delta_hash,
+                     "da_pointer": t.da_pointer, "sig_hex": t.sig.hex()}
+                    for t in txs],
+            "bodies": {p: b.tolist() for p, b in blk.bodies.items()},
+            "transfers": [{"from_pub": t.from_pub, "to_addr": t.to_addr,
+                           "amount": t.amount, "nonce": t.nonce,
+                           "sig_hex": t.sig.hex()} for t in blk.transfers],
+        })
+        return blk.hash
+
+    b1 = add(tree.genesis.hash, [m0, m1], m0)          # height 1: both mine
+    # fund check: m0 has miner+proposer share now; send some to m1 in block 2
+    pay = TransferTx(from_pub=m0.pub, to_addr=address(m1.pub),
+                     amount=tree.ledger[b1].balance(address(m0.pub)) // 4,
+                     nonce=0).signed(m0)
+    b2 = add(b1, [m0], m1, transfers=[pay])            # height 2: transfer settles
+    b2f = add(b1, [m1], m1)                            # FORK at height 2
+    b3 = add(b2, [m0, m1], m0)                         # extends b2 -> heaviest chain
+    v["chain_replay"] = [{
+        "genesis_w": genesis_w.tolist(),
+        "data_contributor": founder,
+        "blocks": blocks_out,
+        "expected_head": tree.head,
+        "expected_head_height": tree.blocks[tree.head].header.height,
+        "expected_state_root": state_root(tree.head_state()),
+        "expected_ledger_root": tree.head_ledger().root(),
+        "expected_supply": tree.head_ledger().supply(),
+    }]
+    assert tree.head == b3, "test setup: heaviest chain must win"
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
