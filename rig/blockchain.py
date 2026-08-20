@@ -96,7 +96,7 @@ def validate_block(block: Block, parent_w_int: np.ndarray) -> np.ndarray:
 class BlockTree:
     """All known blocks, with heaviest-valid-chain selection (Nakamoto fork choice)."""
 
-    def __init__(self, genesis_w_int: np.ndarray):
+    def __init__(self, genesis_w_int: np.ndarray, prune_depth: int | None = None):
         self.genesis_w = genesis_w_int.copy()
         gh = Header(0, "0" * 64, state_root(genesis_w_int), _sha(b""), 0, 0, "genesis")
         self.genesis = Block(gh, [], {})
@@ -104,6 +104,12 @@ class BlockTree:
         self.state = {self.genesis.hash: genesis_w_int.copy()}     # per-block post-state
         self.cum_work = {self.genesis.hash: 0}
         self.head = self.genesis.hash
+        # prune_depth: keep full state + bodies only within this many blocks of the
+        # head (plus genesis). Essential at real-model scale — an 86M state is
+        # ~0.7GB, so retaining one per block OOMs in minutes. Headers, txs and
+        # cum_work are kept forever (fork choice needs them); a reorg deeper than
+        # prune_depth would need replay from genesis (Bitcoin prunes the same way).
+        self.prune_depth = prune_depth
 
     def add_block(self, block: Block) -> bool:
         """Validate and attach a block. Returns True if it became the new head."""
@@ -121,8 +127,23 @@ class BlockTree:
                 (self.cum_work[block.hash] == self.cum_work[self.head]
                  and block.hash < self.head)):
             self.head = block.hash
+            self._prune_deep()
             return True
+        self._prune_deep()
         return False
+
+    def _prune_deep(self):
+        """Drop heavy per-block data (state vector, delta bodies) for blocks more
+        than prune_depth below the head. Headers/txs/cum_work stay."""
+        if self.prune_depth is None:
+            return
+        floor = self.blocks[self.head].header.height - self.prune_depth
+        for bh, b in self.blocks.items():
+            if bh == self.genesis.hash or b.header.height >= floor:
+                continue
+            self.state.pop(bh, None)
+            if b.bodies:
+                b.bodies = {}
 
     def head_state(self) -> np.ndarray:
         return self.state[self.head]

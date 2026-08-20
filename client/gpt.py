@@ -94,7 +94,10 @@ class GPT(nn.Module):
         self.lnf = nn.LayerNorm(cfg.n_embd)
         self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         self.apply(self._init)
-        self.head.weight = self.tok.weight       # weight tying (standard; one page fewer)
+        # NOTE: head deliberately NOT tied to tok — the old (pre-flash) architecture
+        # trained them separately, and keeping them separate makes the new attention
+        # exactly math-equivalent to the old, so trained checkpoints convert by a
+        # pure rename (client/convert_ckpt.py).
 
     def _init(self, m):
         if isinstance(m, (nn.Linear, nn.Embedding)):

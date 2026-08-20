@@ -27,12 +27,15 @@ import time
 import webbrowser
 
 from rig.chain import dequantize
+from . import gossip as g
 from .data import ByteData
 from .gpt import build
-from .gossip import GOSSIP_CFG, GENESIS_SEED, GossipNode, _dbg
+from .gossip import GossipNode, _dbg
 from .trainer import set_flat_params
 
 import torch
+
+SERVE_DEVICE = "cpu"        # set by --serve-device; big models want mps/cuda for chat
 
 
 # --------------------------------------------------------------------------
@@ -42,8 +45,9 @@ class WatchNode(GossipNode):
     def __init__(self, node_id, host, port, peers, n_total, train=False):
         super().__init__(node_id, host, port, peers, n_total)
         self.train = train
-        # separate CPU model for serving chat — never touches the trainer's GPU
-        self.serve_model, _ = build(GOSSIP_CFG, device="cpu", seed=GENESIS_SEED)
+        # separate model for serving chat — its own device, never the trainer's
+        self.serve_model, self.serve_device = build(g.MODEL_CFG, device=SERVE_DEVICE,
+                                                    seed=g.GENESIS_SEED)
         self.serve_model.eval()
         self.serve_height = -1
         self.val_history = []                      # [(height, val_loss)]
@@ -83,17 +87,19 @@ class WatchNode(GossipNode):
         if self.val_history and self.val_history[-1][0] == height:
             return
         if self._val_data is None:
-            self._val_data = ByteData(block_size=GOSSIP_CFG.block_size, device="cpu")
+            kwargs = {"path": g.DATA_PATH} if g.DATA_PATH else {}
+            self._val_data = ByteData(block_size=g.MODEL_CFG.block_size,
+                                      device=self.serve_device, **kwargs)
         self._sync_serve()
-        v = self._val_data.estimate_loss(self.serve_model, iters=3)["val"]
+        v = self._val_data.estimate_loss(self.serve_model, batch_size=8, iters=3)["val"]
         self.val_history.append((height, round(float(v), 4)))
 
     def chat(self, prompt: str, n_new=220, temperature=0.85):
         """Generate from the CURRENT HEAD weights; stamp the reply with the block
         it came from — the model you talked to is the one the chain agrees on."""
         h = self._sync_serve()
-        raw = prompt.encode("utf-8")[-GOSSIP_CFG.block_size + 1:] or b" "
-        idx = torch.tensor([list(raw)], dtype=torch.long)
+        raw = prompt.encode("utf-8")[-g.MODEL_CFG.block_size + 1:] or b" "
+        idx = torch.tensor([list(raw)], dtype=torch.long, device=self.serve_device)
         with torch.no_grad():
             out = self.serve_model.generate(idx, n_new, temperature=temperature)
         text = bytes(out[0].tolist()[len(raw):]).decode("utf-8", errors="replace")
@@ -293,6 +299,11 @@ def _demo(a):
     subprocesses), attach the observer + web UI to it, and open the browser.
     Ctrl-C tears the whole thing down."""
     t0 = time.time() + 4
+    extra = []
+    for flag in ("model", "data", "genesis", "inner", "batch"):
+        v = getattr(a, flag, None)
+        if v:
+            extra += [f"--{flag}", str(v)]
     kids = []
     for i, port in enumerate((a.port + 1, a.port + 2)):
         other = a.port + 2 if i == 0 else a.port + 1
@@ -301,7 +312,7 @@ def _demo(a):
              "--port", str(port), "--peers",
              f"127.0.0.1:{other},127.0.0.1:{a.port}",
              "--n", "2", "--seconds", str(int(a.seconds)),
-             "--interval", "2.0", "--device", "cpu", "--t0", str(t0)],
+             "--interval", "2.0", "--device", "cpu", "--t0", str(t0)] + extra,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     print(f"demo chain: 2 trainer nodes launched — watch it live in the browser", flush=True)
     a.id, a.peers = 9, f"127.0.0.1:{a.port+1},127.0.0.1:{a.port+2}"
@@ -325,7 +336,16 @@ def main():
     ap.add_argument("--seconds", type=float, default=1e9)   # run ~forever by default
     ap.add_argument("--train", action="store_true")         # also mine, not just watch
     ap.add_argument("--open", action="store_true")          # auto-open the browser
+    ap.add_argument("--model", default=None, choices=list(g.MODEL_PRESETS))
+    ap.add_argument("--data", default=None)
+    ap.add_argument("--genesis", default=None)
+    ap.add_argument("--inner", type=int, default=None)
+    ap.add_argument("--batch", type=int, default=None)
+    ap.add_argument("--serve-device", default="cpu")        # mps/cuda for big-model chat
     a = ap.parse_args()
+    g.apply_flags(a)
+    global SERVE_DEVICE
+    SERVE_DEVICE = a.serve_device
     if a.demo:
         _demo(a)
     else:

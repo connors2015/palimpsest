@@ -42,12 +42,20 @@ from .trainer import DiLoCoMiner, flat_params, set_flat_params
 
 KEEP_FRAC = 0.02             # top-k delta compression (50x on the wire)
 
-GOSSIP_CFG = GPTConfig(n_layer=2, n_head=4, n_embd=64, block_size=64)   # small: light gossip
+GOSSIP_CFG = GPTConfig(n_layer=2, n_head=4, n_embd=64, block_size=64)   # toy: light gossip
+SMALL_CFG = GPTConfig(n_layer=12, n_head=12, n_embd=768, block_size=256)  # the real 86M
+MODEL_PRESETS = {"toy": GOSSIP_CFG, "small": SMALL_CFG}
+
+# module config — set by CLI flags before nodes are built (watch.py shares these)
+MODEL_CFG = GOSSIP_CFG
 INNER_STEPS = 10
 BATCH = 24
 INCLUDE_K = 8
 GENESIS_SEED = 1337          # network constant: every node's genesis weights match
+GENESIS_FILE = None          # …or a shared pretrained genesis (convert_ckpt --genesis)
+DATA_PATH = None             # corpus file (default: TinyShakespeare auto-download)
 DEVICE_OVERRIDE = None       # set by --device
+PRUNE_DEPTH = 8              # keep heavy per-block state only this deep (0.7GB each at 86M)
 
 
 async def _send(w, obj):
@@ -65,16 +73,26 @@ class RealCore:
 
     def __init__(self, node_id, seed=0):
         self.node_id = node_id
-        self.model, self.device = build(GOSSIP_CFG, device=DEVICE_OVERRIDE, seed=GENESIS_SEED)
-        self.data = ByteData(block_size=GOSSIP_CFG.block_size, device=self.device)
+        self.model, self.device = build(MODEL_CFG, device=DEVICE_OVERRIDE, seed=GENESIS_SEED)
+        if GENESIS_FILE:                          # warm start: shared pretrained genesis
+            from .convert_ckpt import load_genesis
+            w, _ = load_genesis(GENESIS_FILE)
+            set_flat_params(self.model, w)
+        kwargs = {"path": DATA_PATH} if DATA_PATH else {}
+        self.data = ByteData(block_size=MODEL_CFG.block_size, device=self.device, **kwargs)
         self.miner = DiLoCoMiner(self.model, self.data, self.device)
         self.key = Key.generate(f"node{node_id}".encode().ljust(32, b"0"))
-        self.tree = BlockTree(quantize(flat_params(self.model)))
+        self.tree = BlockTree(quantize(flat_params(self.model)), prune_depth=PRUNE_DEPTH)
         self.mempool, self.seen_tx, self.seen_block = {}, set(), set()
         self.orphans, self.pending = {}, {}       # pending: blocks awaiting bodies
-        self.body_store = {}                      # txid -> dense delta, RETAINED
+        # only COMPRESSED payloads are retained (an 86M dense body is ~0.7GB; its
+        # payload ~14MB). Dense bodies are derived on demand and dropped.
         self.payload_store = {}                   # txid -> compressed payload, RETAINED
         self.comp = Compressor(keep_frac=KEEP_FRAC)
+
+    def _body(self, txid):
+        """Densify a retained payload on demand (transient — never stored)."""
+        return decompress(self.payload_store[txid])
 
     def head_snapshot(self):
         """Read the current head on the CALLER's thread (cheap, touches the tree)."""
@@ -108,8 +126,7 @@ class RealCore:
                         delta_hash=dh, da_pointer=ptr).signed(self.key)
         if tx.txid() not in self.seen_tx:
             self.seen_tx.add(tx.txid())
-            self.mempool[tx.txid()] = (tx, dense)
-            self.body_store[tx.txid()] = dense
+            self.mempool[tx.txid()] = tx
             self.payload_store[tx.txid()] = payload
             outbox.append(("tx", tx, payload))
 
@@ -119,13 +136,13 @@ class RealCore:
         if not tx.verify():
             _dbg(self.node_id, f"tx from shard{tx.shard_id} REJECT (bad sig)")
             return
-        dense = decompress(payload)
+        dense = decompress(payload)                           # transient — hash check only
         if delta_hash(dense.tobytes()) != tx.delta_hash:
             _dbg(self.node_id, f"tx from shard{tx.shard_id} REJECT (hash mismatch)")
             return
+        del dense
         self.seen_tx.add(tx.txid())
-        self.mempool[tx.txid()] = (tx, dense)
-        self.body_store[tx.txid()] = dense
+        self.mempool[tx.txid()] = tx
         self.payload_store[tx.txid()] = payload
         outbox.append(("tx", tx, payload))
         self._retry_pending(outbox)                           # a block may now be complete
@@ -133,22 +150,22 @@ class RealCore:
     def propose(self, outbox):
         head = self.tree.head
         hh = self.tree.blocks[head].header.height
-        cands = [(tx, body) for (tx, body) in self.mempool.values() if tx.base_height == hh]
+        cands = [tx for tx in self.mempool.values() if tx.base_height == hh]
         if not cands:
             return
-        cands.sort(key=lambda t: t[0].txid())
+        cands.sort(key=lambda t: t.txid())
         chosen, seen_miners = [], set()
-        for tx, body in cands:                     # at most one delta per miner per block
+        for tx in cands:                           # at most one delta per miner per block
             if tx.miner in seen_miners:
                 continue
             seen_miners.add(tx.miner)
-            chosen.append((tx, body))
+            chosen.append(tx)
             if len(chosen) >= INCLUDE_K:
                 break
-        accepted = [tx for tx, _ in chosen]
-        bodies = {tx.da_pointer: body for tx, body in chosen}
+        accepted = chosen
+        bodies = {tx.da_pointer: self._body(tx.txid()) for tx in chosen}   # transient
         block = build_block(self.tree, head, accepted, bodies,
-                            {tx.txid(): 1.0 for tx, _ in chosen}, self.key.pub)
+                            {tx.txid(): 1.0 for tx in chosen}, self.key.pub)
         try:
             became_head = self.tree.add_block(block)           # our own block; guard anyway
         except ValidationError as e:
@@ -164,9 +181,9 @@ class RealCore:
         if bh in self.seen_block:
             return
         bodies, missing = {}, False
-        for tx in txs:                                 # rebuild bodies from the RETAINED store
-            if tx.txid() in self.body_store:
-                bodies[tx.da_pointer] = self.body_store[tx.txid()]
+        for tx in txs:                                 # densify from retained payloads
+            if tx.txid() in self.payload_store:
+                bodies[tx.da_pointer] = self._body(tx.txid())
             else:
                 missing = True
         if missing:
@@ -195,9 +212,8 @@ class RealCore:
             dense = decompress(payloads[tx.txid()])
             if delta_hash(dense.tobytes()) != tx.delta_hash:
                 return
-            self.body_store[tx.txid()] = dense
             self.payload_store[tx.txid()] = payloads[tx.txid()]
-            bodies[tx.da_pointer] = dense
+            bodies[tx.da_pointer] = dense              # transient — used for install only
         _dbg(self.node_id, f'fullblock h{header.height} received, installing')
         self._install(Block(header, txs, bodies), outbox)
 
@@ -220,7 +236,7 @@ class RealCore:
 
     def _retry_pending(self, outbox):
         for bh, (header, txs) in list(self.pending.items()):
-            if all(tx.txid() in self.body_store for tx in txs):
+            if all(tx.txid() in self.payload_store for tx in txs):
                 del self.pending[bh]
                 self.recv_block(header, txs, outbox)
 
@@ -381,13 +397,33 @@ def main():
     ap.add_argument("--t0", type=float, default=0.0)
     ap.add_argument("--interval", type=float, default=1.5)
     ap.add_argument("--device", default=None)      # cuda|mps|cpu (auto if unset)
+    ap.add_argument("--model", default="toy", choices=list(MODEL_PRESETS))
+    ap.add_argument("--data", default=None)        # corpus path (default TinyShakespeare)
+    ap.add_argument("--genesis", default=None)     # pretrained genesis .npz (all nodes SAME file)
+    ap.add_argument("--inner", type=int, default=None)
+    ap.add_argument("--batch", type=int, default=None)
     a = ap.parse_args()
-    global DEVICE_OVERRIDE
-    DEVICE_OVERRIDE = a.device
+    apply_flags(a)
     peers = [(h, int(p)) for h, p in (x.split(":") for x in a.peers.split(",") if x)]
     node = GossipNode(a.id, "0.0.0.0", a.port, peers, a.n,
                       interval=a.interval, t0=a.t0 or None)
     asyncio.run(node.run(a.seconds))
+
+
+def apply_flags(a):
+    """Set module config from CLI flags (shared by gossip and watch mains)."""
+    global DEVICE_OVERRIDE, MODEL_CFG, DATA_PATH, GENESIS_FILE, INNER_STEPS, BATCH
+    DEVICE_OVERRIDE = getattr(a, "device", None)
+    if getattr(a, "model", None):
+        MODEL_CFG = MODEL_PRESETS[a.model]
+    if getattr(a, "data", None):
+        DATA_PATH = a.data
+    if getattr(a, "genesis", None):
+        GENESIS_FILE = a.genesis
+    if getattr(a, "inner", None):
+        INNER_STEPS = a.inner
+    if getattr(a, "batch", None):
+        BATCH = a.batch
 
 
 if __name__ == "__main__":
