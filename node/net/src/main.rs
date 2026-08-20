@@ -210,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         t0: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),
         last_proposed_round: -1,
+        last_announced_round: -1,
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;
     Ok(())

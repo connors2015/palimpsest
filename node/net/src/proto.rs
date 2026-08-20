@@ -272,6 +272,10 @@ pub enum Gossip {
     Atx { tx: Value },
     /// A block — commitments only.
     Blk { block: StoredBlock },
+    /// Tiny per-round head announcement — the self-healing heartbeat: any node
+    /// seeing an unknown head syncs from its sender, so divergence resolves
+    /// within a round regardless of what earlier messages were lost.
+    Head { hash: String, height: u64 },
 }
 
 /// Range chain sync over libp2p request-response (JSON codec).

@@ -146,6 +146,7 @@ pub struct Node {
     pub train_inflight: bool,
     pub t0: f64,
     pub last_proposed_round: i64,
+    pub last_announced_round: i64,
 }
 
 impl Node {
@@ -434,6 +435,15 @@ pub async fn run(
             }
             _ = tick.tick() => {
                 let round = ((now() - node.t0 - jitter) / node.cfg.interval).floor() as i64;
+                if round >= 0 && round != node.last_announced_round {
+                    node.last_announced_round = round;
+                    // the self-healing heartbeat: announce our head every round
+                    let head_msg = Gossip::Head {
+                        hash: node.tree.head.clone(),
+                        height: node.head_height(),
+                    };
+                    node.publish(&mut swarm, &head_msg);
+                }
                 if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
                     node.last_proposed_round = round;
                     // republish unconfirmed deltas for the current height: a
@@ -560,6 +570,17 @@ pub async fn run(
                             Gossip::Blk { block } => {
                                 node.install(block, Some(propagation_source), &mut swarm);
                                 node.retry_pending(&mut swarm);
+                            }
+                            Gossip::Head { hash, height } => {
+                                // unknown head (or a heavier-looking chain we
+                                // don't hold) -> pull the sender's recent chain
+                                if !node.tree.blocks.contains_key(&hash) {
+                                    let from = node.head_height()
+                                        .min(height).saturating_sub(8);
+                                    let req = SyncRequest { from_height: from, count: 64 };
+                                    swarm.behaviour_mut().sync
+                                        .send_request(&propagation_source, req);
+                                }
                             }
                         }
                     }
