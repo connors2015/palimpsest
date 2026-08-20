@@ -98,6 +98,7 @@ ExecStart=$APP/node/target/release/palimpsest-node \\
   --genesis-file $APP/genesis.bin \\
   --port $NODE_PORT --api-port $API_PORT --bridge-port 7999 \\
   --relay-server \\
+  --prune-depth 2 \\
   --external-address /ip4/$PUBLIC_IP/udp/$NODE_PORT/quic-v1 \\
   --data-contributor $DATA_CONTRIBUTOR
 Restart=always

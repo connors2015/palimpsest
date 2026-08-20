@@ -597,7 +597,10 @@ pub async fn run(
                         request_response::Event::Message { message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            // serve blocks along OUR head chain in the range
+                            // serve blocks along OUR head chain in the range;
+                            // cap the batch — payload-heavy responses at real
+                            // model scale (~18MB/block) OOM small peers
+                            let count = request.count.min(8);
                             let mut chain = Vec::new();
                             let mut cur = node.tree.head.clone();
                             while cur != node.tree.genesis_hash {
@@ -605,7 +608,7 @@ pub async fn run(
                                 if hdr.height < request.from_height {
                                     break;
                                 }
-                                if hdr.height < request.from_height + request.count {
+                                if hdr.height < request.from_height + count {
                                     if let Some(sb) = node.blocks_full.get(&cur) {
                                         chain.push(sb.clone());
                                     }
