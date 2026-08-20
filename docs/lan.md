@@ -6,10 +6,10 @@ synchronous — each block the coordinator ships weights + a beacon-assigned sha
 to every miner and waits for all deltas — so consensus stays reproducible even
 though the miners now have different clocks and hardware.
 
-## Verified result (Mac coordinator + chris-server miners, over Tailscale)
+## Verified result (Mac coordinator + the GPU server miners, over Tailscale)
 
-A 4-miner run — 2 miners local on the Mac, 2 on chris-server (32-core Linux,
-reached over Tailscale at `100.105.226.13`) — trained a `TinyTransformer` to
+A 4-miner run — 2 miners local on the Mac, 2 on the GPU server (32-core Linux,
+reached over Tailscale at `<tailnet-ip>`) — trained a `TinyTransformer` to
 0.999 accuracy in 20 blocks and replayed bit-exact. The decisive check:
 
 ```

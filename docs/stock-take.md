@@ -29,7 +29,7 @@ poisoning resistance; (6) it can actually be built and run.
 | 3 | Internal revenue **pays actors** | **Modelled** | Fee split (55/10/25/10), reward distribution, stake & slashing (`e2e.py`, `economics.py`). The *loop closing* — inference revenue exceeding training cost — is a market outcome, not a code property (Phase 3 goal) |
 | 4 | **Self-improving flywheel** | **Built (sim)** | The full loop runs end-to-end: train → score → apply → attested serve → fee → reward (`e2e.py`); the model climbs 0.13 → 1.0 through the chain |
 | 5 | **50%+1 poisoning resistance** | **Corrected** | See below — the honest deviation |
-| 6 | **Can be built and run** | **Built** | 117 passing tests; runs coordinator-free across the Mac + chris-server over Tailscale; a live browser viewer |
+| 6 | **Can be built and run** | **Built** | 117 passing tests; runs coordinator-free across the Mac + the GPU server over Tailscale; a live browser viewer |
 
 Plus everything the proposition implied but didn't name, now real: an unbiasable
 threshold-BLS beacon with DKG (`beacon.py`, `dkg.py`), a peer-to-peer gossip

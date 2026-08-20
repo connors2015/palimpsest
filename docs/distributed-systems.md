@@ -32,13 +32,13 @@ What each part maps to:
 - **Economic backing.** Stake is slashable on proven faults; slashed stake pays
   the challenger a bounty and burns the rest.
 - **Runs across machines.** `rig/lan.py` (coordinator form) already trains across
-  the Mac + chris-server with byte-identical consensus; the gossip form is the
+  the Mac + the GPU server with byte-identical consensus; the gossip form is the
   coordinator-free successor.
 
 ## What is still faked or simplified (honest scope)
 
 - **Gossip now runs over real async sockets** (`rig/gossip_net.py`) — verified
-  coordinator-free across machines (2 nodes on the Mac + 1 on chris-server over
+  coordinator-free across machines (2 nodes on the Mac + 1 on the GPU server over
   Tailscale all converged to the identical head at height 32). The in-process
   `rig/p2p.py` remains as the deterministic, fully-testable model of the same
   logic. Remaining productionization: NAT traversal, peer scoring/eviction, and
