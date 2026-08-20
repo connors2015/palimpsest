@@ -37,7 +37,7 @@ A single JSON document, hashed and pinned, containing:
 | `genesis_data_weight` | GENESIS_DATA_WEIGHT | same |
 | `founding_corpus_hash` | sha256 of the corpus file(s) | registry entry `data_hash`; corpus pinned on the CAS/DA layer |
 | `block_interval` | seconds per round | node config |
-| `bootstrap_peers` | seed-node multiaddrs | node config |
+| `bootstrap_peers` | seed-node multiaddrs (first public seed: `/ip4/169.58.211.248/udp/9800/quic-v1`) | node config |
 
 **Rule: any change to this table after ceremony is a hard fork by definition.**
 
@@ -92,8 +92,10 @@ founder holds no special immunity.
       conversion of founder holdings — those are the events that change the
       legal character of the token, not its existence.
 - [ ] External audit of consensus + ledger (rig is the spec; `node/core` golden-vector-pinned)
-- [ ] NAT traversal live (AutoNAT/DCUtR/relay-v2 on the Rust node) so volunteers can join
-- [ ] Wallet hardening shipped (encrypted files, mnemonics, checksummed addresses)
+- [x] NAT traversal live — AutoNAT/DCUtR/relay-v2 shipped in the Rust node; the
+      first PUBLIC seed+relay is up (`/ip4/169.58.211.248/udp/9800/quic-v1`),
+      and a fresh node dialing only that multiaddr connects and agrees on genesis.
+- [x] Wallet hardening shipped (encrypted files, BIP39 mnemonics, checksummed pal1… addresses)
 - [ ] Real corpus decision + license posture for the founding data
 - [ ] Repo public; binaries reproducibly built and checksummed
 
