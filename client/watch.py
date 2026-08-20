@@ -94,6 +94,29 @@ class WatchNode(GossipNode):
         v = self._val_data.estimate_loss(self.serve_model, batch_size=8, iters=3)["val"]
         self.val_history.append((height, round(float(v), 4)))
 
+    def submit_transfer(self, q: dict):
+        """Accept a signed transfer into the local pool. HONEST STATUS: transfers
+        validate against the head ledger here, but block-inclusion is the next
+        protocol revision (the block format gains a transfer lane + ledger_root
+        commitment at the network restart) — until then they are queued, not
+        settled."""
+        from rig.token import TransferTx, address as token_address
+        try:
+            tx = TransferTx(from_pub=str(q["from_pub"]), to_addr=str(q["to_addr"]),
+                            amount=int(q["amount"]), nonce=int(q["nonce"]),
+                            sig=bytes.fromhex(q["sig"]))
+        except (KeyError, ValueError) as e:
+            return {"ok": False, "error": f"malformed: {e}"}
+        led = self.core.head_ledger()
+        if not tx.verify():
+            return {"ok": False, "error": "bad signature"}
+        if led.balance(token_address(tx.from_pub)) < tx.amount:
+            return {"ok": False, "error": "insufficient balance"}
+        self.transfer_pool = getattr(self, "transfer_pool", {})
+        self.transfer_pool[tx.txid()] = tx
+        return {"ok": True, "txid": tx.txid(),
+                "status": "queued — settles at the transfer-lane protocol rev"}
+
     def chat(self, prompt: str, n_new=220, temperature=0.85):
         """Generate from the CURRENT HEAD weights; stamp the reply with the block
         it came from — the model you talked to is the one the chain agrees on."""
@@ -134,12 +157,25 @@ async def _http(node: WatchNode, host, port):
             n = int(headers.get("content-length", 0))
             if n:
                 body = await reader.readexactly(n)
-            method, path = req.split()[0], req.split()[1]
+            method, full = req.split()[0], req.split()[1]
+            path, _, query = full.partition("?")
+            params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
 
             if method == "GET" and path == "/":
                 payload, ctype = PAGE.encode(), "text/html; charset=utf-8"
             elif method == "GET" and path == "/status":
                 payload, ctype = json.dumps(node.status()).encode(), "application/json"
+            elif method == "GET" and path == "/balance":
+                led = node.core.head_ledger()
+                addr = params.get("addr", "")
+                h = node.core.tree.blocks[node.core.tree.head].header.height
+                payload = json.dumps({"addr": addr, "grains": led.balance(addr),
+                                      "nonce": led.nonces.get(addr, 0),
+                                      "supply": led.supply(), "height": h}).encode()
+                ctype = "application/json"
+            elif method == "POST" and path == "/transfer":
+                payload, ctype = json.dumps(node.submit_transfer(
+                    json.loads(body or b"{}"))).encode(), "application/json"
             elif method == "POST" and path == "/chat":
                 q = json.loads(body or b"{}")
                 payload = json.dumps(node.chat(str(q.get("prompt", ""))[:2000],
@@ -342,6 +378,7 @@ def main():
     ap.add_argument("--inner", type=int, default=None)
     ap.add_argument("--batch", type=int, default=None)
     ap.add_argument("--serve-device", default="cpu")        # mps/cuda for big-model chat
+    ap.add_argument("--data-contributor", default=None)     # same genesis param as trainers
     a = ap.parse_args()
     g.apply_flags(a)
     global SERVE_DEVICE

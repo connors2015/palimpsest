@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 .DS_Store
 client/data/*.txt
+
+# wallets NEVER enter the repo
+wallet.json
+*.wallet

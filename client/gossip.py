@@ -35,6 +35,7 @@ import numpy as np
 from rig.blockchain import Block, BlockTree, ValidationError, build_block
 from rig.chain import dequantize, quantize, state_root
 from rig.crypto import BackpropTx, Key, delta_hash
+from rig.token import TokenLedger
 from .compress import Compressor, decompress
 from .data import ByteData
 from .gpt import GPTConfig, build
@@ -56,6 +57,9 @@ GENESIS_FILE = None          # …or a shared pretrained genesis (convert_ckpt -
 DATA_PATH = None             # corpus file (default: TinyShakespeare auto-download)
 DEVICE_OVERRIDE = None       # set by --device
 PRUNE_DEPTH = 8              # keep heavy per-block state only this deep (0.7GB each at 86M)
+DATA_CONTRIBUTOR = None      # genesis parameter: address earning the data share (§9).
+                             # MUST be identical on every node (it's part of the
+                             # deterministic reward computation).
 
 
 async def _send(w, obj):
@@ -89,6 +93,40 @@ class RealCore:
         # payload ~14MB). Dense bodies are derived on demand and dropped.
         self.payload_store = {}                   # txid -> compressed payload, RETAINED
         self.comp = Compressor(keep_frac=KEEP_FRAC)
+        # the token ledger is chain state: per-block, deterministic, empty at
+        # genesis (fair launch — every grain minted by a block reward)
+        self.ledgers = {self.tree.genesis.hash: TokenLedger()}
+
+    def _apply_ledger(self, block):
+        """Deterministic reward application for an installed block. Every node
+        holding the same chain computes the identical ledger."""
+        if block.hash in self.ledgers:
+            return
+        parent = self.ledger_for(block.header.prev_hash)
+        led = parent.copy()
+        led.apply_reward(block.header.height,
+                         miner_pubs=[tx.miner for tx in block.txs],
+                         proposer_pub=block.header.proposer,
+                         data_addrs=[DATA_CONTRIBUTOR] if DATA_CONTRIBUTOR else [])
+        self.ledgers[block.hash] = led
+
+    def ledger_for(self, bh):
+        """Ledger at a block, replaying forward from the nearest kept ancestor
+        if needed (headers/txs are retained forever, so this always works)."""
+        if bh in self.ledgers:
+            return self.ledgers[bh]
+        lineage = []
+        cur = bh
+        while cur not in self.ledgers:
+            b = self.tree.blocks[cur]
+            lineage.append(b)
+            cur = b.header.prev_hash
+        for b in reversed(lineage):
+            self._apply_ledger(b)
+        return self.ledgers[bh]
+
+    def head_ledger(self):
+        return self.ledger_for(self.tree.head)
 
     def _body(self, txid):
         """Densify a retained payload on demand (transient — never stored)."""
@@ -171,6 +209,7 @@ class RealCore:
         except ValidationError as e:
             _dbg(self.node_id, f"own block rejected: {e}")
             return
+        self._apply_ledger(block)                              # rewards mint per block
         if became_head:
             self.seen_block.add(block.hash)
             self._prune(block)
@@ -228,6 +267,7 @@ class RealCore:
                 _dbg(self.node_id, f"h{block.header.height} INVALID: {e}")
             return
         self.seen_block.add(block.hash)
+        self._apply_ledger(block)                              # rewards mint per block
         _dbg(self.node_id, f'INSTALLED h{block.header.height}, head=h{self.tree.blocks[self.tree.head].header.height}')
         self._prune_txs(block.txs)
         outbox.append(("block", block.header, block.txs))   # relay compact
@@ -402,6 +442,8 @@ def main():
     ap.add_argument("--genesis", default=None)     # pretrained genesis .npz (all nodes SAME file)
     ap.add_argument("--inner", type=int, default=None)
     ap.add_argument("--batch", type=int, default=None)
+    ap.add_argument("--data-contributor", default=None,
+                    help="genesis param: address earning the data share (same on ALL nodes)")
     a = ap.parse_args()
     apply_flags(a)
     peers = [(h, int(p)) for h, p in (x.split(":") for x in a.peers.split(",") if x)]
@@ -412,8 +454,11 @@ def main():
 
 def apply_flags(a):
     """Set module config from CLI flags (shared by gossip and watch mains)."""
-    global DEVICE_OVERRIDE, MODEL_CFG, DATA_PATH, GENESIS_FILE, INNER_STEPS, BATCH
+    global DEVICE_OVERRIDE, MODEL_CFG, DATA_PATH, GENESIS_FILE, INNER_STEPS, BATCH, \
+        DATA_CONTRIBUTOR
     DEVICE_OVERRIDE = getattr(a, "device", None)
+    if getattr(a, "data_contributor", None):
+        DATA_CONTRIBUTOR = a.data_contributor
     if getattr(a, "model", None):
         MODEL_CFG = MODEL_PRESETS[a.model]
     if getattr(a, "data", None):
