@@ -627,9 +627,11 @@ pub async fn run(
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     info!(%peer_id, "peer connected");
-                    // opportunistic catch-up from every new peer
+                    // opportunistic catch-up from every new peer — anchor BELOW
+                    // our head: an equal-height fork needs the peer's blocks at
+                    // heights we already have, not just above them
                     let req = SyncRequest {
-                        from_height: node.head_height() + 1, count: 64,
+                        from_height: node.head_height().saturating_sub(8), count: 64,
                     };
                     swarm.behaviour_mut().sync.send_request(&peer_id, req);
                 }
