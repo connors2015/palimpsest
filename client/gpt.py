@@ -49,10 +49,31 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         assert cfg.n_embd % cfg.n_head == 0
+        hd = cfg.n_embd // cfg.n_head
+        assert hd % 2 == 0, "RoPE needs an even head dim"
         self.n_head = cfg.n_head
         self.qkv = nn.Linear(cfg.n_embd, 3 * cfg.n_embd)
         self.proj = nn.Linear(cfg.n_embd, cfg.n_embd)
         self.dropout = cfg.dropout
+        # RoPE frequencies — a CONSTANT, not a parameter (persistent=False keeps it
+        # out of checkpoints). Rotary position means the model has NO learned
+        # position table: context length is a runtime/hardware choice, never a
+        # weight-shape commitment — serving nodes advertise whatever max context
+        # their GPU can run, and growing context is not a model surgery.
+        self.register_buffer(
+            "inv_freq", 1.0 / (10000.0 ** (torch.arange(0, hd, 2).float() / hd)),
+            persistent=False)
+
+    def _rope(self, q, k, T, device):
+        t = torch.arange(T, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq)                  # (T, hd/2)
+        cos = torch.cat([freqs.cos(), freqs.cos()], -1).to(q.dtype)   # (T, hd)
+        sin = torch.cat([freqs.sin(), freqs.sin()], -1).to(q.dtype)
+        hd2 = q.size(-1) // 2
+
+        def rot(v):                                            # (…, hd) -> rotate halves
+            return torch.cat([-v[..., hd2:], v[..., :hd2]], -1)
+        return q * cos + rot(q) * sin, k * cos + rot(k) * sin
 
     def forward(self, x):
         B, T, C = x.shape
@@ -61,6 +82,7 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, hd).transpose(1, 2)
         k = k.view(B, T, self.n_head, hd).transpose(1, 2)
         v = v.view(B, T, self.n_head, hd).transpose(1, 2)
+        q, k = self._rope(q, k, T, x.device)                   # rotary positions
         y = F.scaled_dot_product_attention(
             q, k, v, is_causal=True,
             dropout_p=self.dropout if self.training else 0.0)
@@ -88,7 +110,7 @@ class GPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.tok = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.pos = nn.Embedding(cfg.block_size, cfg.n_embd)
+        # no position embedding — positions are rotary (RoPE), inside attention
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.lnf = nn.LayerNorm(cfg.n_embd)
@@ -107,8 +129,7 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-        pos = torch.arange(T, device=idx.device)
-        x = self.drop(self.tok(idx) + self.pos(pos))
+        x = self.drop(self.tok(idx))
         for b in self.blocks:
             x = b(x)
         logits = self.head(self.lnf(x))
