@@ -33,12 +33,12 @@ pub enum FromBridge {
     NeedState,
 }
 
-async fn write_frame(s: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+async fn write_frame<W: AsyncWriteExt + Unpin>(s: &mut W, bytes: &[u8]) -> std::io::Result<()> {
     s.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
     s.write_all(bytes).await
 }
 
-async fn read_frame(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+async fn read_frame<R: AsyncReadExt + Unpin>(s: &mut R) -> std::io::Result<Vec<u8>> {
     let mut len = [0u8; 4];
     s.read_exact(&mut len).await?;
     let n = u32::from_be_bytes(len) as usize;
@@ -47,60 +47,87 @@ async fn read_frame(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// One bridge connection. The socket is SPLIT: a dedicated reader task drains
+/// the trainer's frames no matter what — the node may be mid-write of a 20MB
+/// state advance while the trainer is mid-write of an 18MB delta, and if one
+/// task did both, the two large writes deadlock against full TCP buffers
+/// (found live in the dress rehearsal).
 async fn serve_one(
-    mut sock: TcpStream,
+    sock: TcpStream,
     cmds: &mut mpsc::Receiver<ToBridge>,
     events: &mpsc::Sender<FromBridge>,
 ) -> std::io::Result<()> {
+    let (mut rd, mut wr) = sock.into_split();
     // handshake: the bridge speaks first
-    let hello: Value = serde_json::from_slice(&read_frame(&mut sock).await?)?;
+    let hello: Value = serde_json::from_slice(&read_frame(&mut rd).await?)?;
     if hello["t"] != "hello" {
         return Ok(());
     }
     info!("trainer bridge connected");
     let _ = events.send(FromBridge::Connected).await;
-    loop {
+
+    let ev = events.clone();
+    let mut reader = tokio::spawn(async move {
+        loop {
+            let frame = read_frame(&mut rd).await?;
+            let v: Value = serde_json::from_slice(&frame)?;
+            match v["t"].as_str() {
+                Some("delta") => {
+                    let payload: Payload = serde_json::from_value(v["payload"].clone())
+                        .map_err(std::io::Error::other)?;
+                    let _ = ev.send(FromBridge::Delta {
+                        height: v["height"].as_u64().unwrap_or(0),
+                        loss: v["loss"].as_f64().unwrap_or(0.0),
+                        payload,
+                    }).await;
+                }
+                Some("resync") => {
+                    let _ = ev.send(FromBridge::NeedState).await;
+                }
+                _ => {}
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), std::io::Error>(())
+    });
+
+    let result = loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else { return Ok(()) };
-                match cmd {
+                let Some(cmd) = cmd else { break Ok(()) };
+                let r = match cmd {
                     ToBridge::State { height, state } => {
                         let head = json!({"t": "state", "height": height,
                                           "n": state.len(), "bin_next": true});
-                        write_frame(&mut sock, head.to_string().as_bytes()).await?;
-                        write_frame(&mut sock,
-                                    &palimpsest_core::int64_bytes(&state)).await?;
+                        match write_frame(&mut wr, head.to_string().as_bytes()).await {
+                            Ok(()) => write_frame(&mut wr,
+                                &palimpsest_core::int64_bytes(&state)).await,
+                            e => e,
+                        }
                     }
                     ToBridge::Train { height, seed } => {
                         let m = json!({"t": "train", "height": height, "seed": seed});
-                        write_frame(&mut sock, m.to_string().as_bytes()).await?;
+                        write_frame(&mut wr, m.to_string().as_bytes()).await
                     }
                     ToBridge::Advance { height, sparse } => {
-                        let m = json!({"t": "advance", "height": height,
-                                       "sparse": sparse});
-                        write_frame(&mut sock, m.to_string().as_bytes()).await?;
+                        let m = json!({"t": "advance", "height": height, "sparse": sparse});
+                        write_frame(&mut wr, m.to_string().as_bytes()).await
                     }
+                };
+                if let Err(e) = r {
+                    break Err(e);
                 }
             }
-            frame = read_frame(&mut sock) => {
-                let v: Value = serde_json::from_slice(&frame?)?;
-                match v["t"].as_str() {
-                    Some("delta") => {
-                        let payload: Payload =
-                            serde_json::from_value(v["payload"].clone())
-                            .map_err(std::io::Error::other)?;
-                        let _ = events.send(FromBridge::Delta {
-                            height: v["height"].as_u64().unwrap_or(0),
-                            loss: v["loss"].as_f64().unwrap_or(0.0),
-                            payload,
-                        }).await;
-                    }
-                    Some("resync") => { let _ = events.send(FromBridge::NeedState).await; }
-                    _ => {}
-                }
+            res = &mut reader => {
+                break match res {
+                    Ok(inner) => inner,
+                    Err(join) => Err(std::io::Error::other(join)),
+                };
             }
         }
-    }
+    };
+    reader.abort();
+    result
 }
 
 /// Run the bridge listener forever; one trainer at a time, reconnects welcome.
