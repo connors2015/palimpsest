@@ -97,3 +97,10 @@ means re-syncing from peers.
 `scripts/devnet.sh [seconds]` — two nodes + two PyTorch trainers on localhost,
 asserts byte-identical convergence at exit. Golden vectors
 (`cd node && cargo test`) pin the consensus math to the Python reference.
+
+## Live bootstrap peers
+
+| Seed | Multiaddr | API |
+|---|---|---|
+| contabo-eu-1 (public, relay) | `/ip4/169.58.211.248/udp/9800/quic-v1` | `http://169.58.211.248:8080/status` |
+| cluster (private net) | `/ip4/10.0.1.1/udp/30980/quic-v1` | `http://10.0.1.1:30981/status` |
