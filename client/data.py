@@ -32,11 +32,13 @@ class ByteData:
             _ensure_corpus(path)
         with open(path, "rb") as f:
             raw = f.read()
-        data = np.frombuffer(raw, dtype=np.uint8).astype(np.int64)
+        # keep the corpus as BYTES in memory (uint8) — an 18GB corpus as int64
+        # would be 144GB of RAM; batches are widened to long per sample below
+        data = np.frombuffer(raw, dtype=np.uint8)
         n = len(data)
         cut = int(n * (1 - val_frac))
-        self.train = torch.from_numpy(data[:cut])
-        self.val = torch.from_numpy(data[cut:])
+        self.train = torch.from_numpy(data[:cut].copy())
+        self.val = torch.from_numpy(data[cut:].copy())
         self.block_size = block_size
         self.device = device
         self.n_bytes = n
@@ -53,8 +55,8 @@ class ByteData:
             lo = sid * span
             hi = lo + span
         ix = lo + torch.randint(hi - lo, (batch_size,), generator=generator)
-        x = torch.stack([src[i:i + self.block_size] for i in ix])
-        y = torch.stack([src[i + 1:i + 1 + self.block_size] for i in ix])
+        x = torch.stack([src[i:i + self.block_size] for i in ix]).long()
+        y = torch.stack([src[i + 1:i + 1 + self.block_size] for i in ix]).long()
         if self.device == "cuda":                       # pinned async copy — CUDA only
             x = x.pin_memory().to(self.device, non_blocking=True)
             y = y.pin_memory().to(self.device, non_blocking=True)
