@@ -35,16 +35,25 @@ PRESETS = {
 }
 
 
-def load_bytes(path):
+def load_bytes(path, device):
+    """Load the corpus as a uint8 tensor RESIDENT ON THE GPU (600 MB of bytes is
+    cheap in VRAM) so batching is a single on-device gather — zero host→device
+    copies per step, no per-item numpy stacking."""
     with open(path, "rb") as f:
-        return np.frombuffer(f.read(), dtype=np.uint8)
+        t = torch.from_numpy(np.frombuffer(f.read(), dtype=np.uint8).copy())
+    if device == "cuda" and t.numel() < 2 * 1024**3:      # keep it on-GPU if it fits
+        t = t.to(device)
+    return t
 
 
 def get_batch(data, bs, block, device, gen):
-    ix = torch.randint(len(data) - block - 1, (bs,), generator=gen)
-    x = torch.stack([torch.from_numpy(data[i:i + block].astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy(data[i + 1:i + 1 + block].astype(np.int64)) for i in ix])
-    return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    ix = torch.randint(len(data) - block - 1, (bs,), generator=gen).to(data.device)
+    idx = ix[:, None] + torch.arange(block + 1, device=data.device)[None, :]
+    seq = data[idx].long()                                 # one gather, on-device
+    x, y = seq[:, :-1], seq[:, 1:]
+    if data.device.type != device:                         # corpus stayed on CPU
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    return x, y
 
 
 def lr_at(step, warmup, total, peak, floor):
@@ -56,6 +65,9 @@ def lr_at(step, warmup, total, peak, floor):
     return floor + 0.5 * (peak - floor) * (1 + math.cos(math.pi * r))
 
 
+AMP_DTYPE = torch.float16          # set in main(): bf16 on Ampere+, fp16 on Turing
+
+
 @torch.no_grad()
 def evaluate(model, data, block, device, iters=40, bs=16):
     model.eval()
@@ -63,7 +75,7 @@ def evaluate(model, data, block, device, iters=40, bs=16):
     losses = []
     for _ in range(iters):
         x, y = get_batch(data, bs, block, device, gen)
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device == "cuda"):
+        with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=device == "cuda"):
             _, loss = model(x, y)
         losses.append(loss.item())
     model.train()
@@ -80,6 +92,7 @@ def sample(model, block, device, prompt=b"Once upon a time", n=240, temp=0.8):
 
 
 def save_ckpt(path, model, opt, scaler, step, cfg, best):
+    model = getattr(model, "_orig_mod", model)   # unwrap torch.compile
     tmp = path + ".tmp"
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
                 "scaler": scaler.state_dict(), "step": step,
@@ -100,6 +113,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=300)
     ap.add_argument("--total-steps", type=int, default=200000)   # cosine horizon
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the model (recommended on rented Ampere+)")
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -108,21 +123,40 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
+    # precision: bf16 on Ampere+ (no scaler needed, no overflow risk); fp16 with a
+    # GradScaler on Turing (2080 Ti) whose tensor cores are fp16-only.
+    global AMP_DTYPE
+    use_fp16 = False
+    if device == "cuda":
+        if torch.cuda.get_device_capability()[0] >= 8:
+            AMP_DTYPE = torch.bfloat16
+        else:
+            AMP_DTYPE = torch.float16
+            use_fp16 = True
+
     cfg = PRESETS[a.preset]
     model, _ = build(cfg, device=device)
     n_params = model.num_params()
+    if a.compile:
+        try:
+            model = torch.compile(model)
+            print("torch.compile: on", flush=True)
+        except Exception as e:                              # fall back gracefully
+            print(f"torch.compile unavailable ({e}); continuing eager", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=a.peak_lr,
-                            betas=(0.9, 0.95), weight_decay=0.1)
-    scaler = torch.cuda.amp.GradScaler(enabled=device == "cuda")
+                            betas=(0.9, 0.95), weight_decay=0.1,
+                            fused=(device == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)
 
-    train = load_bytes(a.data)
-    val = load_bytes(a.val) if a.val and os.path.exists(a.val) else train
+    train = load_bytes(a.data, device)
+    val = load_bytes(a.val, device) if a.val and os.path.exists(a.val) else train
     step, best = 0, float("inf")
 
     ckpt_path = os.path.join(a.out, "latest.pt")
     if a.resume and os.path.exists(ckpt_path):
         ck = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
+        getattr(model, "_orig_mod", model).load_state_dict(ck["model"])
+        opt.load_state_dict(ck["opt"])
         scaler.load_state_dict(ck["scaler"]); step = ck["step"]; best = ck["best"]
         print(f"resumed from step {step}", flush=True)
 
@@ -130,7 +164,9 @@ def main():
     gen = torch.Generator().manual_seed(1337 + step)
     ln2 = math.log(2)
 
-    print(f"pretrain {a.preset} {n_params/1e6:.1f}M params on {device} | "
+    prec = ("bf16" if AMP_DTYPE is torch.bfloat16 else "fp16+scaler") if device == "cuda" else "fp32"
+    print(f"pretrain {a.preset} {n_params/1e6:.1f}M params on {device} "
+          f"({prec}, corpus on {train.device.type}) | "
           f"corpus {len(train)/1e6:.0f}MB train, {len(val)/1e6:.1f}MB val | "
           f"block {cfg.block_size} batch {a.batch}x{a.grad_accum} | "
           f"budget {a.hours:.1f}h", flush=True)
@@ -149,7 +185,7 @@ def main():
         loss_acc = 0.0
         for micro in range(a.grad_accum):
             x, y = get_batch(train, a.batch, cfg.block_size, device, gen)
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device == "cuda"):
+            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=device == "cuda"):
                 _, loss = model(x, y)
                 loss = loss / a.grad_accum
             scaler.scale(loss).backward()
