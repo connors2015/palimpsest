@@ -127,6 +127,7 @@ pub struct NodeConfig {
     pub rotate: Option<(u64, u64)>, // (n, id): deterministic devnet rotation
     pub seconds: f64,               // 0 = run forever
     pub data_contributor: Option<String>,
+    pub peers: String,              // configured peers — re-dialed when lost
 }
 
 pub struct Node {
@@ -443,6 +444,13 @@ pub async fn run(
                         height: node.head_height(),
                     };
                     node.publish(&mut swarm, &head_msg);
+                    // …and re-dial configured peers when connections are lost
+                    // (restarts on either side otherwise orphan the mesh forever)
+                    let expected = node.cfg.peers.split(',')
+                        .filter(|s| !s.is_empty()).count();
+                    if swarm.network_info().num_peers() < expected {
+                        dial_peers(&mut swarm, &node.cfg.peers.clone());
+                    }
                 }
                 if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
                     node.last_proposed_round = round;

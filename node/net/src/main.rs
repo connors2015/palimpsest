@@ -202,6 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rotate,
             seconds: args.seconds,
             data_contributor: dc,
+            peers: args.peers.clone(),
         },
         topic,
         bridge_tx: bridge_cmd_tx,
