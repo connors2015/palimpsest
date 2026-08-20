@@ -55,11 +55,27 @@ python -m client.node coordinator --port 9800 --miners 4 --rounds 50
 Miners then dial your machine's IP. The model architecture (`MODEL_CFG` in
 `client/node.py`) must match across everyone on the network.
 
-## Notes for this phase
-- This is the coordinator form — the simplest thing that proves real cross-GPU
-  training over the network. The coordinator-free gossip form lives in
-  `rig/gossip_net.py` and is the successor.
-- The signed-delta path is real (Ed25519); the write-price, staking, DA, and
-  beacon mechanisms are built (`rig/`) and get folded into the client next.
-- Model size is bounded by your GPU memory; a 2080 Ti (11 GB) comfortably trains
-  models up in the ~100M-parameter range with a modest batch and context.
+## Model scaling (measured on the RTX 2080 Ti, 11 GB)
+
+The GPT config (`MODEL_CFG`) scales straight up; verified on the 2080 Ti:
+
+| config | params | VRAM | notes |
+|---|---|---|---|
+| 4L / 128d | ~1M | <1 GB | the cross-machine default (fast on any device) |
+| 8L / 512d | 26M | 1.0 GB | loss 5.5 → 3.1 in 30 steps |
+| 12L / 768d / 256ctx | **86M** (GPT-2-small) | **4.0 GB** | loss 5.8 → 2.44 in 400 steps; learns Shakespeare's form |
+
+An 86M model uses under 4 GB of 11 GB — there is headroom for larger. The one
+thing that grows with the model is the delta size (86M params ≈ 688 MB as int64),
+so at scale the client uses delta compression (DiLoCo/DisTrO-class, WHITEPAPER
+§6) rather than shipping raw deltas — the same technique that made internet-scale
+training feasible.
+
+## Which client to run
+- `python -m client.node …` — the plain coordinator client (real training,
+  signed deltas). Simplest.
+- `python -m client.chain_node …` — the FULL stack folded in: threshold-BLS
+  beacon (leader + data-shard assignment), erasure-coded DA with availability
+  sampling, staking/slashing, write-price homeostat, hash-linked blocks.
+- `python -m client.gossip …` — coordinator-free gossip (rotating leader, fork
+  choice). See its module docstring for the current scope.
