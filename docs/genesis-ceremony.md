@@ -85,7 +85,12 @@ founder holds no special immunity.
 
 ## 6. Preconditions before the ceremony can run
 
-- [ ] Legal counsel on the token (founder action — hard blocker)
+- [x] Token legal posture — **founder's decision: no counsel engaged at launch.**
+      The network fair-launches with no sale, no premine, and no profit
+      promises; the founder's data-contributor share is publicly disclosed in
+      the genesis parameters. Revisit before any exchange listing or any
+      conversion of founder holdings — those are the events that change the
+      legal character of the token, not its existence.
 - [ ] External audit of consensus + ledger (rig is the spec; `node/core` golden-vector-pinned)
 - [ ] NAT traversal live (AutoNAT/DCUtR/relay-v2 on the Rust node) so volunteers can join
 - [ ] Wallet hardening shipped (encrypted files, mnemonics, checksummed addresses)
