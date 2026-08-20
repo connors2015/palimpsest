@@ -41,10 +41,18 @@ class ByteData:
         self.device = device
         self.n_bytes = n
 
-    def get_batch(self, split: str, batch_size: int, generator=None):
+    def get_batch(self, split: str, batch_size: int, generator=None, shard=None):
+        """Sample a batch. `shard=(id, total)` restricts sampling to the beacon-
+        assigned slice of the corpus, so a miner trains only on its assigned data
+        (§6.2 — no self-selected data)."""
         src = self.train if split == "train" else self.val
-        hi = len(src) - self.block_size - 1
-        ix = torch.randint(hi, (batch_size,), generator=generator)
+        lo, hi = 0, len(src) - self.block_size - 1
+        if shard is not None:
+            sid, total = shard
+            span = (hi) // total
+            lo = sid * span
+            hi = lo + span
+        ix = lo + torch.randint(hi - lo, (batch_size,), generator=generator)
         x = torch.stack([src[i:i + self.block_size] for i in ix])
         y = torch.stack([src[i + 1:i + 1 + self.block_size] for i in ix])
         if self.device == "cuda":                       # pinned async copy — CUDA only

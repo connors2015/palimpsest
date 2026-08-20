@@ -51,14 +51,15 @@ class DiLoCoMiner:
         """Adopt the chain's current weights (int64) into the local model."""
         set_flat_params(self.model, dequantize(base_int))
 
-    def inner_train(self, steps: int, batch_size: int = 32, seed: int = 0):
-        """Run H local steps; return the quantised pseudo-gradient delta (int64)."""
+    def inner_train(self, steps: int, batch_size: int = 32, seed: int = 0, shard=None):
+        """Run H local steps on the (beacon-)assigned data shard; return the
+        quantised pseudo-gradient delta (int64)."""
         base = flat_params(self.model)
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.inner_lr)
         gen = torch.Generator().manual_seed(seed)
         last = 0.0
         for _ in range(steps):
-            x, y = self.data.get_batch("train", batch_size, generator=gen)
+            x, y = self.data.get_batch("train", batch_size, generator=gen, shard=shard)
             _, loss = self.model(x, y)
             opt.zero_grad(); loss.backward(); opt.step()
             last = loss.item()

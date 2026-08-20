@@ -76,6 +76,27 @@ def _vandermonde(n, k):
              for j in range(k)] for i in range(n)]
 
 
+# Full GF(256) multiply table, so encode/reconstruct vectorize over byte-length
+# with numpy instead of a Python inner loop (real model deltas are megabytes).
+import numpy as _np
+
+_EXPa = _np.array(_EXP, dtype=_np.uint16)
+_LOGa = _np.array(_LOG, dtype=_np.int32)
+_la = _LOGa[:, None] + _LOGa[None, :]
+MUL = _EXPa[_la % 255].astype(_np.uint8)
+MUL[0, :] = 0
+MUL[:, 0] = 0
+
+
+def _gf_combine(coeffs, byte_rows):
+    """XOR_r MUL[coeffs[r]] · byte_rows[r] — one output row, vectorised over bytes."""
+    acc = _np.zeros(byte_rows[0].shape, dtype=_np.uint8)
+    for c, row in zip(coeffs, byte_rows):
+        if c:
+            acc ^= MUL[c][row]
+    return acc
+
+
 # --------------------------------------------------------------------------
 # Erasure coding
 # --------------------------------------------------------------------------
@@ -85,19 +106,9 @@ def encode(body: bytes, k: int, n: int) -> list[bytes]:
     pad = (-len(body)) % k
     data = body + b"\x00" * pad
     L = len(data) // k
-    rows = [data[r * L:(r + 1) * L] for r in range(k)]        # k rows, L bytes each
+    rows = _np.frombuffer(data, dtype=_np.uint8).reshape(k, L)  # k rows, L bytes
     V = _vandermonde(n, k)
-    shards = []
-    for i in range(n):
-        vi = V[i]
-        out = bytearray(L)
-        for col in range(L):
-            acc = 0
-            for r in range(k):
-                acc ^= _mul(vi[r], rows[r][col])
-            out[col] = acc
-        shards.append(bytes(out))
-    return shards
+    return [_gf_combine(V[i], rows).tobytes() for i in range(n)]
 
 
 def reconstruct(shards: dict, k: int, orig_len: int) -> bytes:
@@ -110,16 +121,8 @@ def reconstruct(shards: dict, k: int, orig_len: int) -> bytes:
     inv = _mat_inv(sub)
     if inv is None:
         raise ValueError("singular shard set (should not happen for distinct rows)")
-    L = len(shards[idx[0]])
-    rows = []
-    for r in range(k):
-        row = bytearray(L)
-        for col in range(L):
-            acc = 0
-            for c in range(k):
-                acc ^= _mul(inv[r][c], shards[idx[c]][col])
-            row[col] = acc
-        rows.append(bytes(row))
+    cols = [_np.frombuffer(shards[i], dtype=_np.uint8) for i in idx]
+    rows = [_gf_combine(inv[r], cols).tobytes() for r in range(k)]
     return b"".join(rows)[:orig_len]
 
 
