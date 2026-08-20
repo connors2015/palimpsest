@@ -35,7 +35,7 @@ A single JSON document, hashed and pinned, containing:
 | `challenge_params` | CHALLENGE_WINDOW, PROPOSER_LOOKBACK | same |
 | `data_contributor` | founder wallet address | genesis registry entry zero |
 | `genesis_data_weight` | GENESIS_DATA_WEIGHT | same |
-| `founding_corpus_hash` | sha256 of the corpus stream (see composition below) | registry entry `data_hash`; corpus pinned on the CAS/DA layer |
+| `founding_corpus_hash` | **`85aa06fba4ef397b19bc5bc8e62d394bdb067b5eddde418ef5f4680ce1aae3ae`** (18,087,897,989 bytes · 48,284 documents · built 2026-08-20) | registry entry `data_hash`; corpus pinned on the CAS/DA layer |
 | `founding_corpus` | **decided: public-domain only** — ~48k English Project Gutenberg books (~21 GB), built + hashed by `scripts/build_founding_corpus.py` with a per-shard manifest. No web crawl, no share-alike, no gated sources: the founding entry earns the founder's share and is challengeable by design, so its provenance is bulletproof. Code, Wikipedia, and web-scale text enter later through OTHER contributors' staked submissions and the §10.2 campaign track — the data economy working as intended. | `founding_manifest.json` |
 | `block_interval` | seconds per round | node config |
 | `bootstrap_peers` | seed-node multiaddrs (first public seed: `/ip4/169.58.211.248/udp/9800/quic-v1`) | node config |
