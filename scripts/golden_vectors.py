@@ -27,8 +27,9 @@ from client.compress import compress, decompress
 from rig.blockchain import BlockTree, Header, build_block, txset_root
 from rig.chain import dequantize, quantize, state_root, trimmed_mean_int
 from rig.crypto import BackpropTx, Key, delta_hash
-from rig.token import (TokenLedger, TransferTx, address, canonical_transfers,
-                       emission, transfer_root)
+from rig.token import (CHALLENGE_WINDOW, DataChallengeTx, DataSubmitTx,
+                       DataVoteTx, TokenLedger, TransferTx, address,
+                       data_root, emission, transfer_root)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "node", "vectors", "golden.json")
@@ -111,12 +112,13 @@ def main():
     # --- header hash: python json.dumps(sort_keys=True) byte format -----------
     h = Header(height=5, prev_hash="ab" * 32, state_root="cd" * 32,
                txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub,
-               transfer_root="12" * 32, ledger_root="34" * 32)
+               transfer_root="12" * 32, ledger_root="34" * 32,
+               data_root="56" * 32)
     v["header"] = [{
         "height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
         "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
         "proposer": h.proposer, "transfer_root": h.transfer_root,
-        "ledger_root": h.ledger_root,
+        "ledger_root": h.ledger_root, "data_root": h.data_root,
         "canonical_json": json.dumps(h.__dict__, sort_keys=True),
         "hash": h.block_hash(),
     }]
@@ -147,6 +149,49 @@ def main():
         "transfer_root": transfer_root([xfer]),
     }]
 
+    # --- data lane: submit -> challenge -> vote -> resolve, stepwise ----------
+    kf = Key.generate(b"golden-data-founder-000000000000")
+    led2 = TokenLedger()
+    led2.seed_genesis_data(address(kf.pub))
+    root_genesis = led2.root()
+    led2.apply_reward(1, [key.pub], key.pub, [])          # fund key via mining
+    sub = DataSubmitTx(owner_pub=key.pub, data_hash="aa" * 32, size_bytes=4096,
+                       media_type="csv", stake=led2.balance(address(key.pub)) // 2,
+                       nonce=0).signed(key)
+    assert led2.apply_data_tx(sub, 1, set())
+    root_after_submit = led2.root()
+    led2.apply_reward(2, [k2.pub], k2.pub, [])            # fund k2 (the challenger)
+    ch = DataChallengeTx(challenger_pub=k2.pub, data_id=sub.txid(),
+                         stake=led2.balance(address(k2.pub)) // 4,
+                         reason="validity", nonce=0).signed(k2)
+    assert led2.apply_data_tx(ch, 2, set())
+    vote = DataVoteTx(voter_pub=key.pub, challenge_id=ch.txid(),
+                      support=True, nonce=1).signed(key)
+    assert led2.apply_data_tx(vote, 3, {key.pub})         # key proposed recently
+    root_after_vote = led2.root()
+    led2.resolve_expired_challenges(2 + CHALLENGE_WINDOW)  # upheld -> revoke
+    v["data_lane"] = [{
+        "founder_pub": kf.pub,
+        "root_genesis": root_genesis,
+        "submit": {"owner_pub": sub.owner_pub, "data_hash": sub.data_hash,
+                   "size_bytes": sub.size_bytes, "media_type": sub.media_type,
+                   "stake": sub.stake, "nonce": sub.nonce,
+                   "signing_bytes_hex": sub.signing_bytes().hex(),
+                   "txid": sub.txid(), "sig_hex": sub.sig.hex()},
+        "root_after_submit": root_after_submit,
+        "challenge": {"challenger_pub": ch.challenger_pub, "data_id": ch.data_id,
+                      "stake": ch.stake, "reason": ch.reason, "nonce": ch.nonce,
+                      "txid": ch.txid(), "sig_hex": ch.sig.hex()},
+        "vote": {"voter_pub": vote.voter_pub, "challenge_id": vote.challenge_id,
+                 "support": vote.support, "nonce": vote.nonce,
+                 "txid": vote.txid(), "sig_hex": vote.sig.hex()},
+        "root_after_vote": root_after_vote,
+        "resolve_height": 2 + CHALLENGE_WINDOW,
+        "root_after_resolve": led2.root(),
+        "challenger_balance_after": led2.balance(address(k2.pub)),
+        "data_root_of_three": data_root([sub, ch, vote]),
+    }]
+
     # --- FULL-CHAIN REPLAY: a mini chain with a fork and settled transfers ----
     # Rust must rebuild every block, validate it completely (sigs, state
     # transition, txset/transfer/ledger roots), run fork choice, and land on the
@@ -164,7 +209,7 @@ def main():
 
     blocks_out = []
 
-    def add(parent, miner_keys, proposer_key, transfers=()):
+    def add(parent, miner_keys, proposer_key, transfers=(), data_txs=()):
         hh = tree.blocks[parent].header.height
         txs, bodies = [], {}
         for s, mk in enumerate(miner_keys):
@@ -173,7 +218,7 @@ def main():
             txs.append(tx); bodies[tx.da_pointer] = d
         blk = build_block(tree, parent, txs, bodies,
                           {t.txid(): 1.0 for t in txs}, proposer_key.pub,
-                          transfers=list(transfers))
+                          transfers=list(transfers), data_txs=list(data_txs))
         tree.add_block(blk)
         blocks_out.append({
             "parent": parent, "hash": blk.hash,
@@ -186,6 +231,10 @@ def main():
             "transfers": [{"from_pub": t.from_pub, "to_addr": t.to_addr,
                            "amount": t.amount, "nonce": t.nonce,
                            "sig_hex": t.sig.hex()} for t in blk.transfers],
+            "data_txs": [{"owner_pub": t.owner_pub, "data_hash": t.data_hash,
+                          "size_bytes": t.size_bytes, "media_type": t.media_type,
+                          "stake": t.stake, "nonce": t.nonce,
+                          "sig_hex": t.sig.hex()} for t in blk.data_txs],
         })
         return blk.hash
 
@@ -196,7 +245,11 @@ def main():
                      nonce=0).signed(m0)
     b2 = add(b1, [m0], m1, transfers=[pay])            # height 2: transfer settles
     b2f = add(b1, [m1], m1)                            # FORK at height 2
-    b3 = add(b2, [m0, m1], m0)                         # extends b2 -> heaviest chain
+    sub3 = DataSubmitTx(owner_pub=m0.pub, data_hash="bb" * 32, size_bytes=777,
+                        media_type="image",
+                        stake=tree.ledger[b2].balance(address(m0.pub)) // 3,
+                        nonce=1).signed(m0)
+    b3 = add(b2, [m0, m1], m0, data_txs=[sub3])        # heaviest chain + data lane
     v["chain_replay"] = [{
         "genesis_w": genesis_w.tolist(),
         "data_contributor": founder,

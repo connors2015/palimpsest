@@ -35,7 +35,7 @@ import numpy as np
 from rig.blockchain import Block, BlockTree, ValidationError, build_block
 from rig.chain import dequantize, quantize, state_root
 from rig.crypto import BackpropTx, Key, delta_hash
-from rig.token import canonical_transfers
+from rig.token import canonical_account_txs
 from .compress import Compressor, decompress
 from .data import ByteData
 from .gpt import GPTConfig, build
@@ -98,6 +98,8 @@ class RealCore:
         self.comp = Compressor(keep_frac=KEEP_FRAC)
         self.transfer_pool = {}                   # txid -> TransferTx awaiting inclusion
         self.seen_xfer = set()
+        self.data_pool = {}                       # txid -> Data{Submit,Challenge,Vote}Tx
+        self.seen_dtx = set()
 
     def head_ledger(self):
         return self.tree.head_ledger()
@@ -110,6 +112,15 @@ class RealCore:
         self.seen_xfer.add(tx.txid())
         self.transfer_pool[tx.txid()] = tx
         outbox.append(("xfer", tx))
+
+    def recv_data_tx(self, tx, outbox):
+        """A signed data-lane tx (submit/challenge/vote) enters the mempool and
+        gossips on; a proposer includes it and the ledger_root commits it."""
+        if tx.txid() in self.seen_dtx or not tx.verify():
+            return
+        self.seen_dtx.add(tx.txid())
+        self.data_pool[tx.txid()] = tx
+        outbox.append(("dtx", tx))
 
     def _body(self, txid):
         """Densify a retained payload on demand (transient — never stored)."""
@@ -185,16 +196,26 @@ class RealCore:
                 break
         accepted = chosen
         bodies = {tx.da_pointer: self._body(tx.txid()) for tx in chosen}   # transient
-        # transfer lane: include pool transfers that apply cleanly after this
-        # block's rewards (dry-run, canonical order) — never build an invalid block
+        # account lanes: include pool txs (data + transfers) that apply cleanly
+        # after this block's rewards — dry-run in the SAME canonical order the
+        # validator uses, so we never build an invalid block
+        from rig.token import TransferTx
         scratch = self.tree.ledger[head].copy()
+        scratch.resolve_expired_challenges(hh + 1)
         scratch.apply_reward(hh + 1, [tx.miner for tx in accepted], self.key.pub,
                              [DATA_CONTRIBUTOR] if DATA_CONTRIBUTOR else [])
-        xfers = [t for t in canonical_transfers(list(self.transfer_pool.values()))
-                 if t.verify() and scratch.apply_transfer(t)]
+        jurors = self.tree.recent_proposers(head)
+        xfers, dtxs = [], []
+        for t in canonical_account_txs(list(self.data_pool.values()),
+                                       list(self.transfer_pool.values())):
+            if isinstance(t, TransferTx):
+                if t.verify() and scratch.apply_transfer(t):
+                    xfers.append(t)
+            elif scratch.apply_data_tx(t, hh + 1, jurors):
+                dtxs.append(t)
         block = build_block(self.tree, head, accepted, bodies,
                             {tx.txid(): 1.0 for tx in chosen}, self.key.pub,
-                            transfers=xfers)
+                            transfers=xfers, data_txs=dtxs)
         try:
             became_head = self.tree.add_block(block)           # our own block; guard anyway
         except ValidationError as e:
@@ -202,12 +223,15 @@ class RealCore:
             return
         for t in xfers:                                        # included -> out of pool
             self.transfer_pool.pop(t.txid(), None)
+        for t in dtxs:
+            self.data_pool.pop(t.txid(), None)
         if became_head:
             self.seen_block.add(block.hash)
             self._prune(block)
-            outbox.append(("block", block.header, block.txs, block.transfers))
+            outbox.append(("block", block.header, block.txs,
+                           block.transfers, block.data_txs))
 
-    def recv_block(self, header, txs, transfers, outbox):
+    def recv_block(self, header, txs, transfers, data_txs, outbox):
         bh = header.block_hash()
         if bh in self.seen_block:
             return
@@ -218,20 +242,21 @@ class RealCore:
             else:
                 missing = True
         if missing:
-            self.pending[bh] = (header, txs, transfers)   # wait for the tx(s) to arrive
+            self.pending[bh] = (header, txs, transfers, data_txs)
             outbox.append(("getblock", bh))            # …and request the full block (getdata)
             return
         _dbg(self.node_id, f'block h{header.height} bodies-ready, installing')
-        self._install(Block(header, txs, bodies, list(transfers)), outbox)
+        self._install(Block(header, txs, bodies, list(transfers), list(data_txs)), outbox)
 
     def serve_block(self, bh, outbox):
         """Answer a getblock request with a compressed full block if we have it."""
         b = self.tree.blocks.get(bh)
         if b is not None and all(tx.txid() in self.payload_store for tx in b.txs):
             payloads = {tx.txid(): self.payload_store[tx.txid()] for tx in b.txs}
-            outbox.append(("fullblock", b.header, b.txs, payloads, b.transfers))
+            outbox.append(("fullblock", b.header, b.txs, payloads,
+                           b.transfers, b.data_txs))
 
-    def recv_fullblock(self, header, txs, payloads, transfers, outbox):
+    def recv_fullblock(self, header, txs, payloads, transfers, data_txs, outbox):
         """Initial block download / getdata reply: a block plus the COMPRESSED
         payloads for its txs, so a node that missed the txs can reconstruct the
         bodies and catch up — small on the wire (payloads, not dense bodies)."""
@@ -246,7 +271,7 @@ class RealCore:
             self.payload_store[tx.txid()] = payloads[tx.txid()]
             bodies[tx.da_pointer] = dense              # transient — used for install only
         _dbg(self.node_id, f'fullblock h{header.height} received, installing')
-        self._install(Block(header, txs, bodies, list(transfers)), outbox)
+        self._install(Block(header, txs, bodies, list(transfers), list(data_txs)), outbox)
 
     def _install(self, block, outbox):
         try:
@@ -254,25 +279,29 @@ class RealCore:
         except ValidationError as e:
             if "orphan" in str(e):
                 self.orphans.setdefault(block.header.prev_hash, []).append(
-                    (block.header, block.txs, block.transfers))
+                    (block.header, block.txs, block.transfers, block.data_txs))
             else:
                 _dbg(self.node_id, f"h{block.header.height} INVALID: {e}")
             return
         self.seen_block.add(block.hash)
         _dbg(self.node_id, f'INSTALLED h{block.header.height}, head=h{self.tree.blocks[self.tree.head].header.height}')
         self._prune_txs(block.txs)
-        for t in block.transfers:                      # settled -> out of the pool
+        for t in block.transfers:                      # settled -> out of the pools
             self.transfer_pool.pop(t.txid(), None)
             self.seen_xfer.add(t.txid())
-        outbox.append(("block", block.header, block.txs, block.transfers))
-        for ch, ct, cx in self.orphans.pop(block.hash, []):
-            self.recv_block(ch, ct, cx, outbox)
+        for t in block.data_txs:
+            self.data_pool.pop(t.txid(), None)
+            self.seen_dtx.add(t.txid())
+        outbox.append(("block", block.header, block.txs,
+                       block.transfers, block.data_txs))
+        for ch, ct, cx, cd in self.orphans.pop(block.hash, []):
+            self.recv_block(ch, ct, cx, cd, outbox)
 
     def _retry_pending(self, outbox):
-        for bh, (header, txs, transfers) in list(self.pending.items()):
+        for bh, (header, txs, transfers, data_txs) in list(self.pending.items()):
             if all(tx.txid() in self.payload_store for tx in txs):
                 del self.pending[bh]
-                self.recv_block(header, txs, transfers, outbox)
+                self.recv_block(header, txs, transfers, data_txs, outbox)
 
     def _prune(self, block):
         self._prune_txs(block.txs)
@@ -285,7 +314,8 @@ class RealCore:
         for b in self.tree.chain_from_genesis():
             if all(tx.txid() in self.payload_store for tx in b.txs):
                 payloads = {tx.txid(): self.payload_store[tx.txid()] for tx in b.txs}
-                outbox.append(("fullblock", b.header, b.txs, payloads, b.transfers))
+                outbox.append(("fullblock", b.header, b.txs, payloads,
+                               b.transfers, b.data_txs))
 
     def val_loss(self):
         set_flat_params(self.model, dequantize(self.tree.head_state()))
@@ -325,7 +355,8 @@ class GossipNode:
             for b in self.core.tree.chain_from_genesis():
                 if all(tx.txid() in self.core.payload_store for tx in b.txs):
                     pl = {tx.txid(): self.core.payload_store[tx.txid()] for tx in b.txs}
-                    await _send(writer, ("fullblock", b.header, b.txs, pl, b.transfers))
+                    await _send(writer, ("fullblock", b.header, b.txs, pl,
+                                         b.transfers, b.data_txs))
             while not self._stop.is_set():
                 self._handle(await _recv(reader))
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
@@ -353,10 +384,12 @@ class GossipNode:
             self.core.recv_tx(msg[1], msg[2], outbox)          # (tx, payload)
         elif msg[0] == "xfer":
             self.core.recv_transfer(msg[1], outbox)            # token transfer -> mempool
+        elif msg[0] == "dtx":
+            self.core.recv_data_tx(msg[1], outbox)             # data lane -> mempool
         elif msg[0] == "block":
-            self.core.recv_block(msg[1], msg[2], msg[3], outbox)   # compact + transfers
+            self.core.recv_block(msg[1], msg[2], msg[3], msg[4], outbox)
         elif msg[0] == "fullblock":
-            self.core.recv_fullblock(msg[1], msg[2], msg[3], msg[4], outbox)
+            self.core.recv_fullblock(msg[1], msg[2], msg[3], msg[4], msg[5], outbox)
         elif msg[0] == "getblock":
             self.core.serve_block(msg[1], outbox)              # peer needs a full block
         for m in outbox:

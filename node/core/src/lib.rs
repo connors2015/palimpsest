@@ -176,19 +176,20 @@ pub struct Header {
     pub proposer: String,
     pub transfer_root: String, // rev 2: commitment to the transfer set
     pub ledger_root: String,   // rev 2: token ledger AFTER this block
+    pub data_root: String,     // rev 3: commitment to the data-lane tx set
 }
 
 impl Header {
     /// The canonical serialization is Python's `json.dumps(dict, sort_keys=True)`
     /// with default separators (", " and ": "), keys in lexicographic order:
-    /// height, ledger_root, n_txs, prev_hash, proposer, state_root,
+    /// data_root, height, ledger_root, n_txs, prev_hash, proposer, state_root,
     /// transfer_root, txset_root, work. Values are hex strings and ints, so no
     /// JSON string escaping arises.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"height\": {}, \"ledger_root\": \"{}\", \"n_txs\": {}, \"prev_hash\": \"{}\", \"proposer\": \"{}\", \"state_root\": \"{}\", \"transfer_root\": \"{}\", \"txset_root\": \"{}\", \"work\": {}}}",
-            self.height, self.ledger_root, self.n_txs, self.prev_hash,
-            self.proposer, self.state_root, self.transfer_root,
+            "{{\"data_root\": \"{}\", \"height\": {}, \"ledger_root\": \"{}\", \"n_txs\": {}, \"prev_hash\": \"{}\", \"proposer\": \"{}\", \"state_root\": \"{}\", \"transfer_root\": \"{}\", \"txset_root\": \"{}\", \"work\": {}}}",
+            self.data_root, self.height, self.ledger_root, self.n_txs,
+            self.prev_hash, self.proposer, self.state_root, self.transfer_root,
             self.txset_root, self.work
         )
     }

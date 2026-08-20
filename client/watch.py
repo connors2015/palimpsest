@@ -115,6 +115,41 @@ class WatchNode(GossipNode):
         return {"ok": True, "txid": tx.txid(),
                 "status": "in mempool — settles in the next block that includes it"}
 
+    def submit_data(self, kind: str, q: dict):
+        """Accept a signed data-lane tx (submit/challenge/vote), gossip it, and
+        let the next proposer include it — the ledger_root then commits it."""
+        from rig.token import DataChallengeTx, DataSubmitTx, DataVoteTx
+        try:
+            if kind == "submit":
+                tx = DataSubmitTx(owner_pub=str(q["owner_pub"]),
+                                  data_hash=str(q["data_hash"]),
+                                  size_bytes=int(q["size_bytes"]),
+                                  media_type=str(q.get("media_type", "text")),
+                                  stake=int(q["stake"]), nonce=int(q["nonce"]),
+                                  sig=bytes.fromhex(q["sig"]))
+            elif kind == "challenge":
+                tx = DataChallengeTx(challenger_pub=str(q["challenger_pub"]),
+                                     data_id=str(q["data_id"]),
+                                     stake=int(q["stake"]),
+                                     reason=str(q.get("reason", "validity")),
+                                     nonce=int(q["nonce"]),
+                                     sig=bytes.fromhex(q["sig"]))
+            else:
+                tx = DataVoteTx(voter_pub=str(q["voter_pub"]),
+                                challenge_id=str(q["challenge_id"]),
+                                support=bool(q["support"]), nonce=int(q["nonce"]),
+                                sig=bytes.fromhex(q["sig"]))
+        except (KeyError, ValueError) as e:
+            return {"ok": False, "error": f"malformed: {e}"}
+        if not tx.verify():
+            return {"ok": False, "error": "bad signature"}
+        outbox = []
+        self.core.recv_data_tx(tx, outbox)
+        for m in outbox:
+            self._bcast(m)
+        return {"ok": True, "txid": tx.txid(),
+                "status": "in mempool — settles in the next block that includes it"}
+
     def chat(self, prompt: str, n_new=220, temperature=0.85):
         """Generate from the CURRENT HEAD weights; stamp the reply with the block
         it came from — the model you talked to is the one the chain agrees on."""
@@ -174,6 +209,16 @@ async def _http(node: WatchNode, host, port):
             elif method == "POST" and path == "/transfer":
                 payload, ctype = json.dumps(node.submit_transfer(
                     json.loads(body or b"{}"))).encode(), "application/json"
+            elif method == "POST" and path in ("/data/submit", "/data/challenge",
+                                               "/data/vote"):
+                payload, ctype = json.dumps(node.submit_data(
+                    path.rsplit("/", 1)[1],
+                    json.loads(body or b"{}"))).encode(), "application/json"
+            elif method == "GET" and path == "/data/registry":
+                led = node.core.head_ledger()
+                payload = json.dumps({"registry": led.registry,
+                                      "challenges": led.challenges}).encode()
+                ctype = "application/json"
             elif method == "POST" and path == "/chat":
                 q = json.loads(body or b"{}")
                 payload = json.dumps(node.chat(str(q.get("prompt", ""))[:2000],

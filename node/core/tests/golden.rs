@@ -118,6 +118,7 @@ fn header_from(case: &Value) -> core::Header {
         proposer: case["proposer"].as_str().unwrap().into(),
         transfer_root: case["transfer_root"].as_str().unwrap_or("").into(),
         ledger_root: case["ledger_root"].as_str().unwrap_or("").into(),
+        data_root: case["data_root"].as_str().unwrap_or("").into(),
     }
 }
 
@@ -157,7 +158,7 @@ fn transfer_from(t: &Value) -> palimpsest_core::token::TransferTx {
 
 #[test]
 fn ledger_matches_reference() {
-    use palimpsest_core::token::{self, TokenLedger};
+    use palimpsest_core::token::{self, AccountTx, TokenLedger};
     for case in vectors()["ledger"].as_array().unwrap() {
         let miners: Vec<String> = case["miners"].as_array().unwrap()
             .iter().map(|x| x.as_str().unwrap().to_string()).collect();
@@ -171,7 +172,8 @@ fn ledger_matches_reference() {
         let tx = transfer_from(&case["transfer"]);
         assert_eq!(hex::encode(tx.signing_bytes()),
                    case["transfer"]["signing_bytes_hex"].as_str().unwrap());
-        assert_eq!(tx.txid(), case["transfer"]["txid"].as_str().unwrap());
+        assert_eq!(AccountTx::Transfer(tx.clone()).txid(),
+                   case["transfer"]["txid"].as_str().unwrap());
         assert!(led.apply_transfer(&tx), "reference transfer must apply");
         assert_eq!(led.root(), case["root_after_transfer"].as_str().unwrap());
         assert_eq!(token::transfer_root(&[tx]),
@@ -179,6 +181,70 @@ fn ledger_matches_reference() {
         for (addr, bal) in case["balances"].as_object().unwrap() {
             assert_eq!(led.balance(addr), bal.as_u64().unwrap());
         }
+    }
+}
+
+fn data_tx_from(kind: &str, t: &Value) -> palimpsest_core::token::AccountTx {
+    use palimpsest_core::token::*;
+    let sig = hex::decode(t["sig_hex"].as_str().unwrap()).unwrap();
+    match kind {
+        "submit" => AccountTx::DataSubmit(DataSubmitTx {
+            owner_pub: t["owner_pub"].as_str().unwrap().into(),
+            data_hash: t["data_hash"].as_str().unwrap().into(),
+            size_bytes: t["size_bytes"].as_u64().unwrap(),
+            media_type: t["media_type"].as_str().unwrap().into(),
+            stake: t["stake"].as_u64().unwrap(),
+            nonce: t["nonce"].as_u64().unwrap(), sig,
+        }),
+        "challenge" => AccountTx::DataChallenge(DataChallengeTx {
+            challenger_pub: t["challenger_pub"].as_str().unwrap().into(),
+            data_id: t["data_id"].as_str().unwrap().into(),
+            stake: t["stake"].as_u64().unwrap(),
+            reason: t["reason"].as_str().unwrap().into(),
+            nonce: t["nonce"].as_u64().unwrap(), sig,
+        }),
+        _ => AccountTx::DataVote(DataVoteTx {
+            voter_pub: t["voter_pub"].as_str().unwrap().into(),
+            challenge_id: t["challenge_id"].as_str().unwrap().into(),
+            support: t["support"].as_bool().unwrap(),
+            nonce: t["nonce"].as_u64().unwrap(), sig,
+        }),
+    }
+}
+
+#[test]
+fn data_lane_matches_reference() {
+    use palimpsest_core::token::{address, data_root, TokenLedger};
+    use std::collections::HashSet;
+    for case in vectors()["data_lane"].as_array().unwrap() {
+        let mut led = TokenLedger::new();
+        led.seed_genesis_data(&address(case["founder_pub"].as_str().unwrap()));
+        assert_eq!(led.root(), case["root_genesis"].as_str().unwrap(),
+                   "genesis registry serialization mismatch");
+        let sub = data_tx_from("submit", &case["submit"]);
+        assert_eq!(hex::encode(sub.signing_bytes()),
+                   case["submit"]["signing_bytes_hex"].as_str().unwrap());
+        assert_eq!(sub.txid(), case["submit"]["txid"].as_str().unwrap());
+        // fund the submitter exactly as the reference did
+        let owner = case["submit"]["owner_pub"].as_str().unwrap().to_string();
+        led.apply_reward(1, &[owner.clone()], &owner, &[]);
+        assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
+        assert_eq!(led.root(), case["root_after_submit"].as_str().unwrap());
+        let challenger = case["challenge"]["challenger_pub"].as_str().unwrap().to_string();
+        led.apply_reward(2, &[challenger.clone()], &challenger, &[]);
+        let ch = data_tx_from("challenge", &case["challenge"]);
+        assert!(led.apply_data_tx(&ch, 2, &HashSet::new()));
+        let vote = data_tx_from("vote", &case["vote"]);
+        let jurors: HashSet<String> = [owner].into_iter().collect();
+        assert!(led.apply_data_tx(&vote, 3, &jurors));
+        assert_eq!(led.root(), case["root_after_vote"].as_str().unwrap());
+        led.resolve_expired_challenges(case["resolve_height"].as_u64().unwrap());
+        assert_eq!(led.root(), case["root_after_resolve"].as_str().unwrap(),
+                   "challenge resolution mismatch");
+        assert_eq!(led.balance(&palimpsest_core::token::address(&challenger)),
+                   case["challenger_balance_after"].as_u64().unwrap());
+        assert_eq!(data_root(&[sub, ch, vote]),
+                   case["data_root_of_three"].as_str().unwrap());
     }
 }
 
@@ -207,9 +273,11 @@ fn full_chain_replay_matches_reference() {
                 .iter().map(|(k, v)| (k.clone(), i64s(v))).collect();
             let transfers = b["transfers"].as_array().unwrap()
                 .iter().map(transfer_from).collect();
+            let data_txs = b["data_txs"].as_array().unwrap()
+                .iter().map(|t| data_tx_from("submit", t)).collect();
             // full first-principles validation: sigs, DA hashes, state transition,
-            // txset/transfer/ledger roots — then fork choice
-            tree.add_block(Block { header, txs, bodies, transfers })
+            // txset/transfer/data/ledger roots — then fork choice
+            tree.add_block(Block { header, txs, bodies, transfers, data_txs })
                 .expect("reference block must validate");
         }
         assert_eq!(tree.head, case["expected_head"].as_str().unwrap(),

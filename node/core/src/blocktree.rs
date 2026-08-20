@@ -4,15 +4,19 @@
 //! transition (trimmed mean), the tx-set root, and — rev 2 — the full token
 //! transition (rewards + canonical transfers) against the committed ledger_root.
 
-use crate::token::{canonical_transfers, transfer_root, TokenLedger, TransferTx};
+use crate::token::{
+    canonical_account_txs, data_root, transfer_root, AccountTx, TokenLedger,
+    TransferTx, PROPOSER_LOOKBACK,
+};
 use crate::{delta_hash, int64_bytes, state_root, trimmed_mean, txset_root, BackpropTx, Header};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct Block {
     pub header: Header,
     pub txs: Vec<BackpropTx>,
     pub bodies: HashMap<String, Vec<i64>>, // da_pointer -> dense delta
     pub transfers: Vec<TransferTx>,
+    pub data_txs: Vec<AccountTx>,          // rev 3: Data{Submit,Challenge,Vote}
 }
 
 impl Block {
@@ -34,6 +38,7 @@ pub fn validate_block(
     parent_w: &[i64],
     parent_ledger: &TokenLedger,
     data_contributor: Option<&str>,
+    recent_proposers: &HashSet<String>,
 ) -> Result<(Vec<i64>, TokenLedger), ValidationError> {
     let h = &block.header;
     // 1. every delta tx well-formed and signed; DA body matches its hash
@@ -72,17 +77,29 @@ pub fn validate_block(
     if state_root(&w) != h.state_root {
         return Err(err("state_root does not reproduce from txs"));
     }
-    // 4. the transfer lane: transfer-set root + full token transition
+    // 4. the transfer + data lanes: set roots + full token transition, in the
+    //    exact reference order (resolve expired -> rewards -> merged canonical
+    //    account txs)
     if transfer_root(&block.transfers) != h.transfer_root {
         return Err(err("transfer_root mismatch"));
     }
+    if data_root(&block.data_txs) != h.data_root {
+        return Err(err("data_root mismatch"));
+    }
     let mut led = parent_ledger.clone();
+    led.resolve_expired_challenges(h.height);
     let miner_pubs: Vec<String> = block.txs.iter().map(|t| t.miner.clone()).collect();
     let data_addrs: Vec<String> = data_contributor.map(|d| vec![d.to_string()]).unwrap_or_default();
     led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs);
-    for tx in canonical_transfers(&block.transfers) {
-        if !led.apply_transfer(&tx) {
-            return Err(err("invalid transfer (sig/nonce/balance)"));
+    let mut merged: Vec<AccountTx> = block.data_txs.clone();
+    merged.extend(block.transfers.iter().cloned().map(AccountTx::Transfer));
+    for tx in canonical_account_txs(&merged) {
+        let ok = match &tx {
+            AccountTx::Transfer(t) => led.apply_transfer(t),
+            _ => led.apply_data_tx(&tx, h.height, recent_proposers),
+        };
+        if !ok {
+            return Err(err("invalid account tx (sig/nonce/balance/gating)"));
         }
     }
     if led.root() != h.ledger_root {
@@ -114,6 +131,7 @@ impl BlockTree {
             proposer: "genesis".into(),
             transfer_root: String::new(),
             ledger_root: String::new(),
+            data_root: String::new(),
         };
         let ghash = gh.block_hash();
         let mut t = BlockTree {
@@ -127,9 +145,30 @@ impl BlockTree {
         };
         t.blocks.insert(ghash.clone(), gh);
         t.state.insert(ghash.clone(), genesis_w);
-        t.ledger.insert(ghash.clone(), TokenLedger::new()); // fair launch: empty
+        // fair launch: empty balances; the founding corpus is registry entry zero
+        let mut genesis_ledger = TokenLedger::new();
+        if let Some(dc) = &t.data_contributor {
+            genesis_ledger.seed_genesis_data(dc);
+        }
+        t.ledger.insert(ghash.clone(), genesis_ledger);
         t.cum_work.insert(ghash, 0);
         t
+    }
+
+    /// Proposer pubkeys of the last PROPOSER_LOOKBACK blocks ending at `tip` —
+    /// the deterministic juror set for data-challenge votes.
+    pub fn recent_proposers(&self, tip: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut cur = tip.to_string();
+        for _ in 0..PROPOSER_LOOKBACK {
+            if cur == self.genesis_hash {
+                break;
+            }
+            let Some(h) = self.blocks.get(&cur) else { break };
+            out.insert(h.proposer.clone());
+            cur = h.prev_hash.clone();
+        }
+        out
     }
 
     /// Validate + attach; returns Ok(true) if the block became the new head.
@@ -145,11 +184,13 @@ impl BlockTree {
             .ok_or_else(|| err("orphan: parent unknown"))?
             .clone();
         let parent_led = self.ledger[&parent].clone();
+        let jurors = self.recent_proposers(&parent);
         let (w, led) = validate_block(
             &block,
             &parent_w,
             &parent_led,
             self.data_contributor.as_deref(),
+            &jurors,
         )?;
         let work = self.cum_work[&parent] + block.header.work.max(1);
         self.blocks.insert(bh.clone(), block.header);

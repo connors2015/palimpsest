@@ -25,7 +25,9 @@ import numpy as np
 
 from .chain import dequantize, quantize, state_root, trimmed_mean_int
 from .crypto import BackpropTx
-from .token import TokenLedger, canonical_transfers, transfer_root as xfer_root
+from .token import (PROPOSER_LOOKBACK, TokenLedger, TransferTx,
+                    canonical_account_txs, data_root as dta_root,
+                    transfer_root as xfer_root)
 
 
 def _sha(b: bytes) -> str:
@@ -49,6 +51,8 @@ class Header:
     # the TRANSFER LANE (protocol rev 2): the token ledger is consensus state
     transfer_root: str = ""    # order-independent commitment to the transfer set
     ledger_root: str = ""      # token-ledger root AFTER this block (rewards+transfers)
+    # the DATA LANE (protocol rev 3): staked data registry + challenge market
+    data_root: str = ""        # commitment to the block's data-lane tx set
 
     def block_hash(self) -> str:
         return _sha(json.dumps(self.__dict__, sort_keys=True).encode())
@@ -60,6 +64,7 @@ class Block:
     txs: list                  # list[BackpropTx]
     bodies: dict               # da_pointer -> int64 delta array (carried for replay)
     transfers: list = field(default_factory=list)   # list[TransferTx]
+    data_txs: list = field(default_factory=list)    # rev 3: Data{Submit,Challenge,Vote}Tx
 
     @property
     def hash(self) -> str:
@@ -71,26 +76,39 @@ class ValidationError(Exception):
 
 
 def apply_ledger(parent_ledger: TokenLedger, block: Block,
-                 data_contributor: str | None) -> TokenLedger:
-    """The deterministic token-state transition for one block: mint the block
-    reward (miners/proposer/data shares), then apply the transfers in canonical
-    order. Raises if any transfer is invalid — a block carrying one is invalid."""
+                 data_contributor: str | None,
+                 recent_proposers: set[str] = frozenset()) -> TokenLedger:
+    """The deterministic token-state transition for one block, in this exact
+    order (the Rust node mirrors it):
+      1. settle every challenge whose window closed at/before this height;
+      2. mint the block reward (miners/proposer; data share across the weighted
+         registry);
+      3. apply ALL account txs (data lane + transfers) in one merged canonical
+         sequence — (sender address, nonce, txid) — so each wallet's nonce
+         sequence totally orders everything it does.
+    Raises if any tx is invalid — a block carrying one is invalid."""
     led = parent_ledger.copy()
-    led.apply_reward(block.header.height,
-                     miner_pubs=[tx.miner for tx in block.txs],
+    h = block.header.height
+    led.resolve_expired_challenges(h)
+    led.apply_reward(h, miner_pubs=[tx.miner for tx in block.txs],
                      proposer_pub=block.header.proposer,
                      data_addrs=[data_contributor] if data_contributor else [])
-    for tx in canonical_transfers(block.transfers):
-        if not tx.verify():
-            raise ValidationError(f"bad signature on transfer {tx.txid()[:8]}")
-        if not led.apply_transfer(tx):
-            raise ValidationError(f"invalid transfer {tx.txid()[:8]} (nonce/balance)")
+    for tx in canonical_account_txs(block.data_txs, block.transfers):
+        if isinstance(tx, TransferTx):
+            if not tx.verify():
+                raise ValidationError(f"bad signature on transfer {tx.txid()[:8]}")
+            if not led.apply_transfer(tx):
+                raise ValidationError(f"invalid transfer {tx.txid()[:8]} (nonce/balance)")
+        else:
+            if not led.apply_data_tx(tx, h, recent_proposers):
+                raise ValidationError(f"invalid data tx {tx.txid()[:8]}")
     return led
 
 
 def validate_block(block: Block, parent_w_int: np.ndarray,
                    parent_ledger: TokenLedger | None = None,
-                   data_contributor: str | None = None):
+                   data_contributor: str | None = None,
+                   recent_proposers: set[str] = frozenset()):
     """Validate a block from first principles against its parent state.
 
     Returns (post-state weights, post-ledger) if valid; raises ValidationError
@@ -117,12 +135,14 @@ def validate_block(block: Block, parent_w_int: np.ndarray,
     w = parent_w_int + trimmed_mean_int(deltas) if deltas else parent_w_int.copy()
     if state_root(w) != h.state_root:
         raise ValidationError("state_root does not reproduce from txs")
-    # 4. the TRANSFER LANE: transfer-set root + full token-ledger transition
+    # 4. the TRANSFER + DATA LANES: set roots + full token-ledger transition
     led = None
     if parent_ledger is not None:
         if xfer_root(block.transfers) != h.transfer_root:
             raise ValidationError("transfer_root mismatch")
-        led = apply_ledger(parent_ledger, block, data_contributor)
+        if dta_root(block.data_txs) != h.data_root:
+            raise ValidationError("data_root mismatch")
+        led = apply_ledger(parent_ledger, block, data_contributor, recent_proposers)
         if led.root() != h.ledger_root:
             raise ValidationError("ledger_root does not reproduce from block")
     return w, led
@@ -138,10 +158,15 @@ class BlockTree:
         self.genesis = Block(gh, [], {})
         self.blocks = {self.genesis.hash: self.genesis}
         self.state = {self.genesis.hash: genesis_w_int.copy()}     # per-block post-state
-        # the token ledger is chain state too: EMPTY at genesis (fair launch),
-        # advanced deterministically by every block's rewards + transfers.
-        # data_contributor is a GENESIS PARAMETER — identical on every node.
-        self.ledger = {self.genesis.hash: TokenLedger()}
+        # the token ledger is chain state too: EMPTY balances at genesis (fair
+        # launch), advanced deterministically by every block. data_contributor
+        # is a GENESIS PARAMETER (identical on every node): the founding corpus
+        # becomes registry entry zero, owned by that wallet, earning the data
+        # share under the same rules as any staked entry.
+        genesis_ledger = TokenLedger()
+        if data_contributor:
+            genesis_ledger.seed_genesis_data(data_contributor)
+        self.ledger = {self.genesis.hash: genesis_ledger}
         self.data_contributor = data_contributor
         self.cum_work = {self.genesis.hash: 0}
         self.head = self.genesis.hash
@@ -159,18 +184,19 @@ class BlockTree:
         parent = block.header.prev_hash
         if parent not in self.blocks:
             raise ValidationError("orphan: parent unknown")
-        # ledger validation only when the block commits one (rev-2 blocks always
+        # ledger validation only when the block commits one (rev-2+ blocks always
         # do; legacy rev-1 blocks carry ledger_root="" and skip it)
         parent_led = self.ledger.get(parent) if block.header.ledger_root else None
+        juror_pubs = self.recent_proposers(parent)
         w, led = validate_block(block, self.state[parent], parent_led,
-                                self.data_contributor)             # may raise
+                                self.data_contributor, juror_pubs)  # may raise
         self.blocks[block.hash] = block
         self.state[block.hash] = w
         if led is not None:
             self.ledger[block.hash] = led
         else:                                                      # legacy: rewards only
             self.ledger[block.hash] = apply_ledger(
-                self.ledger[parent], block, self.data_contributor)
+                self.ledger[parent], block, self.data_contributor, juror_pubs)
         self.cum_work[block.hash] = self.cum_work[parent] + max(1, block.header.work)
         # heaviest chain wins; ties broken by lexicographically smaller hash
         if (self.cum_work[block.hash] > self.cum_work[self.head] or
@@ -201,6 +227,18 @@ class BlockTree:
     def head_ledger(self) -> TokenLedger:
         return self.ledger[self.head]
 
+    def recent_proposers(self, tip: str) -> set[str]:
+        """Proposer pubkeys of the last PROPOSER_LOOKBACK blocks ending at `tip`
+        — the deterministic juror set for data-challenge votes."""
+        out, cur = set(), tip
+        for _ in range(PROPOSER_LOOKBACK):
+            b = self.blocks.get(cur)
+            if b is None or cur == self.genesis.hash:
+                break
+            out.add(b.header.proposer)
+            cur = b.header.prev_hash
+        return out
+
     def chain_from_genesis(self, tip: str | None = None) -> list:
         tip = tip or self.head
         out = []
@@ -221,14 +259,16 @@ class BlockTree:
 
 
 def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
-                works: dict, proposer: str, transfers: list | None = None) -> Block:
-    """Assemble a valid block extending `parent_hash` from accepted txs (and,
-    rev 2, the transfer lane: the header commits the transfer set and the
-    post-block ledger root).
+                works: dict, proposer: str, transfers: list | None = None,
+                data_txs: list | None = None) -> Block:
+    """Assemble a valid block extending `parent_hash` from accepted txs, plus
+    the transfer lane (rev 2) and the data lane (rev 3): the header commits the
+    transfer set, the data-tx set, and the post-block ledger root.
 
     `works[txid]` is the delta's score (its contribution to block weight)."""
     parent_w = tree.state[parent_hash]
-    transfers = canonical_transfers(transfers or [])
+    transfers = list(transfers or [])
+    data_txs = list(data_txs or [])
     deltas = [bodies[tx.da_pointer] for tx in accepted]
     w = parent_w + trimmed_mean_int(deltas) if deltas else parent_w.copy()
     total_work = int(sum(max(0.0, works.get(tx.txid(), 0.0)) for tx in accepted) * 1000)
@@ -238,9 +278,12 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
         txset_root=txset_root(accepted), n_txs=len(accepted),
         work=total_work, proposer=proposer)
     block = Block(header, accepted,
-                  {t.da_pointer: bodies[t.da_pointer] for t in accepted}, transfers)
-    # commit the token transition (rewards + transfers) into the header
+                  {t.da_pointer: bodies[t.da_pointer] for t in accepted},
+                  transfers, data_txs)
+    # commit the full token transition into the header
     header.transfer_root = xfer_root(transfers)
+    header.data_root = dta_root(data_txs)
     header.ledger_root = apply_ledger(tree.ledger[parent_hash], block,
-                                      tree.data_contributor).root()
+                                      tree.data_contributor,
+                                      tree.recent_proposers(parent_hash)).root()
     return block

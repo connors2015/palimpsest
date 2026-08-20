@@ -100,6 +100,8 @@ def test_ledger_replay_matches(core):
     from rig.blockchain import apply_ledger
     from rig.token import TokenLedger
     led = TokenLedger()
+    led.seed_genesis_data(g.DATA_CONTRIBUTOR)          # genesis registry entry
     for b in core.tree.chain_from_genesis():
-        led = apply_ledger(led, b, g.DATA_CONTRIBUTOR)
+        led = apply_ledger(led, b, g.DATA_CONTRIBUTOR,
+                           core.tree.recent_proposers(b.header.prev_hash))
     assert led.root() == core.head_ledger().root()
