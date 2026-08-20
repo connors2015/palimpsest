@@ -19,6 +19,8 @@
 #         scripts/run dkg            # distributed key generation (no trusted dealer)
 #         scripts/run integrated     # beacon + DA + leader election, one live loop
 #         scripts/run live           # watch the chain live in a browser (localhost:8737)
+#         scripts/run data_flywheel  # data economy end-to-end (bonus + royalties)
+#         scripts/run data_live      # watch your data earn, live (localhost:8738)
 #         scripts/run beacon         # threshold-BLS unbiasable randomness beacon
 #         scripts/run test           # the pytest suite
 # pynacl gives fast Ed25519 (the rig falls back to a slow pure-Python reference

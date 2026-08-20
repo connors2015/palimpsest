@@ -381,6 +381,22 @@ The arbitrage in §9.6 runs on token value; in a deep token bear a hyperscaler m
 
 No pre-sale of emission rights; team/treasury allocation capped and vested against the same milestones as the sunset; genesis weights, corpus registry, and all launch parameters published and replayable from block zero. The credibility of "revenue-anchored" is set at launch and cannot be retrofitted — this section is written before the token exists on purpose.
 
+## 9A. Data as a priced input
+
+The chain already prices one input to the model — gradient contributions, paid to miners by scored improvement. **Data is the other input to the same production function, so it is priced by the same mechanism**: a scored mempool pointed at data. This turns a data contributor from a cost to be curated into a stakeholder who is paid for provable value, and it is what makes "community-owned data" (§11.2) an economic relationship rather than a slogan. Two revenue streams, both implemented and tested (`rig/data.py`, `rig/attribution.py`, `rig/data_flywheel.py`).
+
+### 9A.1 Stage 1 — pay for contribution (the signing bonus)
+
+A **DataTx** is a signed submission to the on-chain data registry. Each **channel** carries a base value rate (research low, professional/proprietary high — the coarse knob, §9.2's per-channel `$/bit`). Within a channel, a shard is priced by its **marginal value**: the first-order effect of training on it on a beacon-drawn holdout — the alignment of the shard's gradient with the descent direction the holdout wants. Two properties fall out for free and are verified in the rig: data that fills a *gap the queries need* prices highest; data the model already covers has a near-zero gradient and prices ≈ 0, so **duplicates and Sybil floods earn nothing without a special rule**. The bonus is paid into a vested ledger.
+
+### 9A.2 Stage 2 — pay for downstream usage (royalties)
+
+The signing bonus pays once; the royalty pays again every time the data helps answer a paying query — the piece that turns data into a standing, income-producing asset. The mechanism is TRAK/TracIn influence made cheap and verifiable: each admitted shard gets an **influence sketch** — its training gradient projected through a shared random matrix (Johnson–Lindenstrauss-faithful, so a small sketch stands in for the full gradient), *summed over the chain's checkpoints* (the chain already has them — TracIn is native to a ledger that replays). For each served query, the emitted answer is sketched the same way, and the royalty slice of the fee is split across the shards whose training **supported** the answer (positive gradient alignment), paid to their owners. Because the sketches are on-chain and recomputable, the royalty split is independently **verifiable**, like everything else here. In the rig this attributes correctly ~90%+ of the time and royalties track usage: the more the world asks about a contributor's corner of knowledge, the more their data earns.
+
+### 9A.3 The tension faced head-on — paying for influence is paying poisoners
+
+Rewarding influential data is, by construction, a bounty on influential *backdoors* — the §12.3 dragon reappears exactly here. The resolution is that **influence gets you paid, but only durable, beneficial influence keeps you paid**: the bonus vests over a window with clawback, and the same replay-excision that removes a discovered backdoor (§10.4) forfeits its unvested reward, halts its royalties, and slashes its stake bond. The rig confirms the economics: a poisoner who earns a large bonus and early royalties still ends **net-negative** once discovery (before full vest) triggers clawback and slashing. Poisoning is not prevented — it is made unprofitable and reversible, which is the same honest posture as §7.2. The residual is the same too: a backdoor never discovered is never clawed back; fast, well-incentivised detection (bounties, challenges) is what shrinks the window.
+
 ## 10. Governance
 
 ### 10.1 Principle: govern as little as possible, verifiably

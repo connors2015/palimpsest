@@ -47,6 +47,72 @@ class Result:
     attribution_acc: float
 
 
+class Simulator:
+    """Reusable data-economy engine: set up contributors, price + admit their
+    data (Stage 1), train, then serve queries one at a time paying royalties
+    (Stage 2). Drives both the batch demo (run) and the live dashboard."""
+
+    def __init__(self, seed=0):
+        rng = np.random.default_rng(seed)
+        self.model = DomainModel(dim=4 + 16, classes=TOTAL_CLASSES, hidden=48)
+        self.rules = make_rules(rng)
+        self.proj = attr.Projector(self.model.param_count, proj_dim=PROJ_DIM)
+        self.ledger = DataLedger(vest_blocks=15)
+        self.keys = {n: Key.generate(n.encode().ljust(32, b"0")) for n in CONTRIBUTORS}
+        self.owner_of = {d: CONTRIBUTORS[d] for d in range(N_DOMAINS)}
+        self.channel_of = {d: CHANNELS[d] for d in range(N_DOMAINS)}
+        self.shards = {d: domain_batch(np.random.default_rng(100 + d), 256, d, self.rules)
+                       for d in range(N_DOMAINS)}
+        self._rng = rng
+        self.royalty_paid = {}
+        self.bonus = {n: 0.0 for n in CONTRIBUTORS}
+        self.served = 0
+
+        # 1–2. price + admit against a fresh model (Stage 1)
+        vec = self.model.init(rng)
+        probes = [mixed_batch(np.random.default_rng(900 + i), 200, self.rules)
+                  for i in range(6)]
+        for d in range(N_DOMAINS):
+            mv = marginal_value(self.model, vec, self.shards[d], probes)
+            tx = DataTx(owner=self.keys[self.owner_of[d]].pub, channel=self.channel_of[d],
+                        content_hash=content_hash(self.shards[d]), n_examples=256,
+                        da_pointer=f"da://{d}", shard_id=d).signed(self.keys[self.owner_of[d]])
+            self.bonus[self.owner_of[d]] += self.ledger.admit(tx, mv * NETWORK_RATE, block=0)
+
+        # 3. train, keeping checkpoints; sketch each shard (Stage 2 prep)
+        self.ckpts = []
+        for step in range(1, max(CKPT_STEPS) + 1):
+            vec = self.model.train_step(vec, mixed_batch(rng, 128, self.rules), lr=0.5, steps=1)
+            if step in CKPT_STEPS:
+                self.ckpts.append(vec.copy())
+        self.vec = vec
+        self.shard_sk = {d: attr.shard_sketch(self.model, self.ckpts, self.shards[d], self.proj)
+                         for d in range(N_DOMAINS)}
+
+    def serve_query(self):
+        """Serve one paid query; attribute; pay royalties. Returns an event."""
+        qd = int(self._rng.choice(N_DOMAINS, p=POPULARITY))
+        x, _ = domain_batch(self._rng, 1, qd, self.rules)
+        ans = int(self.model.predict(self.vec, x)[0])
+        qsk = attr.answer_sketch(self.model, self.ckpts, x[0], ans, self.proj)
+        w = attr.attribute(qsk, self.shard_sk)
+        attr.route_royalty(FEE_PER_QUERY, ROYALTY_SHARE, w,
+                           {d: self.owner_of[d] for d in range(N_DOMAINS)}, self.royalty_paid)
+        self.served += 1
+        top = max(w, key=w.get)
+        return dict(query_domain=qd, credited=self.owner_of[top],
+                    paid={self.owner_of[d]: FEE_PER_QUERY * ROYALTY_SHARE * w[d]
+                          for d in range(N_DOMAINS) if w[d] > 0.01})
+
+    def snapshot(self):
+        return {n: dict(channel=self.channel_of.get(
+                    next(d for d in range(N_DOMAINS) if self.owner_of[d] == n)),
+                    bonus=round(self.bonus[n], 1),
+                    royalties=round(self.royalty_paid.get(n, 0.0), 1),
+                    domain=next(d for d in range(N_DOMAINS) if self.owner_of[d] == n))
+                for n in CONTRIBUTORS}
+
+
 def run(seed=0, serve_rounds=40, queries_per_round=40, verbose=False):
     rng = np.random.default_rng(seed)
     model = DomainModel(dim=4 + 16, classes=TOTAL_CLASSES, hidden=48)
