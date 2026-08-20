@@ -136,6 +136,15 @@ class TokenLedger:
         return True
 
     # ---- commitment ------------------------------------------------------
+    def apply_transfers(self, transfers: list["TransferTx"]) -> bool:
+        """Apply a block's transfers in CANONICAL order. All must apply cleanly;
+        returns False (ledger unchanged is NOT guaranteed — copy first) if any
+        fails. Validators call this on a copy of the parent ledger."""
+        for tx in canonical_transfers(transfers):
+            if not self.apply_transfer(tx):
+                return False
+        return True
+
     def root(self) -> str:
         """Canonical ledger root: sorted JSON over balances + nonces."""
         blob = json.dumps({"balances": dict(sorted(self.balances.items())),
@@ -145,3 +154,17 @@ class TokenLedger:
 
     def supply(self) -> int:
         return sum(self.balances.values())
+
+
+def canonical_transfers(transfers: list[TransferTx]) -> list[TransferTx]:
+    """The consensus ordering of a block's transfers: by (sender address, nonce,
+    txid). Sender-then-nonce guarantees a sender's nonce sequence applies in
+    order; txid breaks any remaining tie deterministically."""
+    return sorted(transfers, key=lambda t: (address(t.from_pub), t.nonce, t.txid()))
+
+
+def transfer_root(transfers: list[TransferTx]) -> str:
+    """Order-independent commitment to a block's transfer set (mirror of
+    blockchain.txset_root)."""
+    joined = "|".join(sorted(t.txid() for t in transfers))
+    return hashlib.sha256(joined.encode()).hexdigest()

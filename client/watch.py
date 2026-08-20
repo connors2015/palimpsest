@@ -95,11 +95,8 @@ class WatchNode(GossipNode):
         self.val_history.append((height, round(float(v), 4)))
 
     def submit_transfer(self, q: dict):
-        """Accept a signed transfer into the local pool. HONEST STATUS: transfers
-        validate against the head ledger here, but block-inclusion is the next
-        protocol revision (the block format gains a transfer lane + ledger_root
-        commitment at the network restart) — until then they are queued, not
-        settled."""
+        """Accept a signed transfer, gossip it to the network, and let the next
+        proposer include it — the block's ledger_root then COMMITS it (settled)."""
         from rig.token import TransferTx, address as token_address
         try:
             tx = TransferTx(from_pub=str(q["from_pub"]), to_addr=str(q["to_addr"]),
@@ -107,15 +104,16 @@ class WatchNode(GossipNode):
                             sig=bytes.fromhex(q["sig"]))
         except (KeyError, ValueError) as e:
             return {"ok": False, "error": f"malformed: {e}"}
-        led = self.core.head_ledger()
         if not tx.verify():
             return {"ok": False, "error": "bad signature"}
-        if led.balance(token_address(tx.from_pub)) < tx.amount:
+        if self.core.head_ledger().balance(token_address(tx.from_pub)) < tx.amount:
             return {"ok": False, "error": "insufficient balance"}
-        self.transfer_pool = getattr(self, "transfer_pool", {})
-        self.transfer_pool[tx.txid()] = tx
+        outbox = []
+        self.core.recv_transfer(tx, outbox)
+        for m in outbox:
+            self._bcast(m)                          # gossip to trainer peers
         return {"ok": True, "txid": tx.txid(),
-                "status": "queued — settles at the transfer-lane protocol rev"}
+                "status": "in mempool — settles in the next block that includes it"}
 
     def chat(self, prompt: str, n_new=220, temperature=0.85):
         """Generate from the CURRENT HEAD weights; stamp the reply with the block

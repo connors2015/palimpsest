@@ -35,7 +35,7 @@ import numpy as np
 from rig.blockchain import Block, BlockTree, ValidationError, build_block
 from rig.chain import dequantize, quantize, state_root
 from rig.crypto import BackpropTx, Key, delta_hash
-from rig.token import TokenLedger
+from rig.token import canonical_transfers
 from .compress import Compressor, decompress
 from .data import ByteData
 from .gpt import GPTConfig, build
@@ -86,47 +86,30 @@ class RealCore:
         self.data = ByteData(block_size=MODEL_CFG.block_size, device=self.device, **kwargs)
         self.miner = DiLoCoMiner(self.model, self.data, self.device)
         self.key = Key.generate(f"node{node_id}".encode().ljust(32, b"0"))
-        self.tree = BlockTree(quantize(flat_params(self.model)), prune_depth=PRUNE_DEPTH)
+        # the token ledger is chain state, owned by the BlockTree: validated per
+        # block (ledger_root), empty at genesis (fair launch), deterministic.
+        self.tree = BlockTree(quantize(flat_params(self.model)), prune_depth=PRUNE_DEPTH,
+                              data_contributor=DATA_CONTRIBUTOR)
         self.mempool, self.seen_tx, self.seen_block = {}, set(), set()
         self.orphans, self.pending = {}, {}       # pending: blocks awaiting bodies
         # only COMPRESSED payloads are retained (an 86M dense body is ~0.7GB; its
         # payload ~14MB). Dense bodies are derived on demand and dropped.
         self.payload_store = {}                   # txid -> compressed payload, RETAINED
         self.comp = Compressor(keep_frac=KEEP_FRAC)
-        # the token ledger is chain state: per-block, deterministic, empty at
-        # genesis (fair launch — every grain minted by a block reward)
-        self.ledgers = {self.tree.genesis.hash: TokenLedger()}
-
-    def _apply_ledger(self, block):
-        """Deterministic reward application for an installed block. Every node
-        holding the same chain computes the identical ledger."""
-        if block.hash in self.ledgers:
-            return
-        parent = self.ledger_for(block.header.prev_hash)
-        led = parent.copy()
-        led.apply_reward(block.header.height,
-                         miner_pubs=[tx.miner for tx in block.txs],
-                         proposer_pub=block.header.proposer,
-                         data_addrs=[DATA_CONTRIBUTOR] if DATA_CONTRIBUTOR else [])
-        self.ledgers[block.hash] = led
-
-    def ledger_for(self, bh):
-        """Ledger at a block, replaying forward from the nearest kept ancestor
-        if needed (headers/txs are retained forever, so this always works)."""
-        if bh in self.ledgers:
-            return self.ledgers[bh]
-        lineage = []
-        cur = bh
-        while cur not in self.ledgers:
-            b = self.tree.blocks[cur]
-            lineage.append(b)
-            cur = b.header.prev_hash
-        for b in reversed(lineage):
-            self._apply_ledger(b)
-        return self.ledgers[bh]
+        self.transfer_pool = {}                   # txid -> TransferTx awaiting inclusion
+        self.seen_xfer = set()
 
     def head_ledger(self):
-        return self.ledger_for(self.tree.head)
+        return self.tree.head_ledger()
+
+    def recv_transfer(self, tx, outbox):
+        """A signed transfer enters the mempool and gossips on; it SETTLES when a
+        proposer includes it in a block (the ledger_root then commits it)."""
+        if tx.txid() in self.seen_xfer or not tx.verify():
+            return
+        self.seen_xfer.add(tx.txid())
+        self.transfer_pool[tx.txid()] = tx
+        outbox.append(("xfer", tx))
 
     def _body(self, txid):
         """Densify a retained payload on demand (transient — never stored)."""
@@ -202,20 +185,29 @@ class RealCore:
                 break
         accepted = chosen
         bodies = {tx.da_pointer: self._body(tx.txid()) for tx in chosen}   # transient
+        # transfer lane: include pool transfers that apply cleanly after this
+        # block's rewards (dry-run, canonical order) — never build an invalid block
+        scratch = self.tree.ledger[head].copy()
+        scratch.apply_reward(hh + 1, [tx.miner for tx in accepted], self.key.pub,
+                             [DATA_CONTRIBUTOR] if DATA_CONTRIBUTOR else [])
+        xfers = [t for t in canonical_transfers(list(self.transfer_pool.values()))
+                 if t.verify() and scratch.apply_transfer(t)]
         block = build_block(self.tree, head, accepted, bodies,
-                            {tx.txid(): 1.0 for tx in chosen}, self.key.pub)
+                            {tx.txid(): 1.0 for tx in chosen}, self.key.pub,
+                            transfers=xfers)
         try:
             became_head = self.tree.add_block(block)           # our own block; guard anyway
         except ValidationError as e:
             _dbg(self.node_id, f"own block rejected: {e}")
             return
-        self._apply_ledger(block)                              # rewards mint per block
+        for t in xfers:                                        # included -> out of pool
+            self.transfer_pool.pop(t.txid(), None)
         if became_head:
             self.seen_block.add(block.hash)
             self._prune(block)
-            outbox.append(("block", block.header, block.txs))  # commitments only
+            outbox.append(("block", block.header, block.txs, block.transfers))
 
-    def recv_block(self, header, txs, outbox):
+    def recv_block(self, header, txs, transfers, outbox):
         bh = header.block_hash()
         if bh in self.seen_block:
             return
@@ -226,20 +218,20 @@ class RealCore:
             else:
                 missing = True
         if missing:
-            self.pending[bh] = (header, txs)           # wait for the tx(s) to arrive
+            self.pending[bh] = (header, txs, transfers)   # wait for the tx(s) to arrive
             outbox.append(("getblock", bh))            # …and request the full block (getdata)
             return
         _dbg(self.node_id, f'block h{header.height} bodies-ready, installing')
-        self._install(Block(header, txs, bodies), outbox)
+        self._install(Block(header, txs, bodies, list(transfers)), outbox)
 
     def serve_block(self, bh, outbox):
         """Answer a getblock request with a compressed full block if we have it."""
         b = self.tree.blocks.get(bh)
         if b is not None and all(tx.txid() in self.payload_store for tx in b.txs):
             payloads = {tx.txid(): self.payload_store[tx.txid()] for tx in b.txs}
-            outbox.append(("fullblock", b.header, b.txs, payloads))
+            outbox.append(("fullblock", b.header, b.txs, payloads, b.transfers))
 
-    def recv_fullblock(self, header, txs, payloads, outbox):
+    def recv_fullblock(self, header, txs, payloads, transfers, outbox):
         """Initial block download / getdata reply: a block plus the COMPRESSED
         payloads for its txs, so a node that missed the txs can reconstruct the
         bodies and catch up — small on the wire (payloads, not dense bodies)."""
@@ -254,31 +246,33 @@ class RealCore:
             self.payload_store[tx.txid()] = payloads[tx.txid()]
             bodies[tx.da_pointer] = dense              # transient — used for install only
         _dbg(self.node_id, f'fullblock h{header.height} received, installing')
-        self._install(Block(header, txs, bodies), outbox)
+        self._install(Block(header, txs, bodies, list(transfers)), outbox)
 
     def _install(self, block, outbox):
         try:
-            self.tree.add_block(block)
+            self.tree.add_block(block)                 # validates weights AND ledger
         except ValidationError as e:
             if "orphan" in str(e):
                 self.orphans.setdefault(block.header.prev_hash, []).append(
-                    (block.header, block.txs))
+                    (block.header, block.txs, block.transfers))
             else:
                 _dbg(self.node_id, f"h{block.header.height} INVALID: {e}")
             return
         self.seen_block.add(block.hash)
-        self._apply_ledger(block)                              # rewards mint per block
         _dbg(self.node_id, f'INSTALLED h{block.header.height}, head=h{self.tree.blocks[self.tree.head].header.height}')
         self._prune_txs(block.txs)
-        outbox.append(("block", block.header, block.txs))   # relay compact
-        for ch, ct in self.orphans.pop(block.hash, []):
-            self.recv_block(ch, ct, outbox)
+        for t in block.transfers:                      # settled -> out of the pool
+            self.transfer_pool.pop(t.txid(), None)
+            self.seen_xfer.add(t.txid())
+        outbox.append(("block", block.header, block.txs, block.transfers))
+        for ch, ct, cx in self.orphans.pop(block.hash, []):
+            self.recv_block(ch, ct, cx, outbox)
 
     def _retry_pending(self, outbox):
-        for bh, (header, txs) in list(self.pending.items()):
+        for bh, (header, txs, transfers) in list(self.pending.items()):
             if all(tx.txid() in self.payload_store for tx in txs):
                 del self.pending[bh]
-                self.recv_block(header, txs, outbox)
+                self.recv_block(header, txs, transfers, outbox)
 
     def _prune(self, block):
         self._prune_txs(block.txs)
@@ -291,7 +285,7 @@ class RealCore:
         for b in self.tree.chain_from_genesis():
             if all(tx.txid() in self.payload_store for tx in b.txs):
                 payloads = {tx.txid(): self.payload_store[tx.txid()] for tx in b.txs}
-                outbox.append(("fullblock", b.header, b.txs, payloads))
+                outbox.append(("fullblock", b.header, b.txs, payloads, b.transfers))
 
     def val_loss(self):
         set_flat_params(self.model, dequantize(self.tree.head_state()))
@@ -331,7 +325,7 @@ class GossipNode:
             for b in self.core.tree.chain_from_genesis():
                 if all(tx.txid() in self.core.payload_store for tx in b.txs):
                     pl = {tx.txid(): self.core.payload_store[tx.txid()] for tx in b.txs}
-                    await _send(writer, ("fullblock", b.header, b.txs, pl))
+                    await _send(writer, ("fullblock", b.header, b.txs, pl, b.transfers))
             while not self._stop.is_set():
                 self._handle(await _recv(reader))
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
@@ -357,10 +351,12 @@ class GossipNode:
             print(f"    [n{self.core.node_id} RECV {msg[0]}]", flush=True)
         if msg[0] == "tx":
             self.core.recv_tx(msg[1], msg[2], outbox)          # (tx, payload)
+        elif msg[0] == "xfer":
+            self.core.recv_transfer(msg[1], outbox)            # token transfer -> mempool
         elif msg[0] == "block":
-            self.core.recv_block(msg[1], msg[2], outbox)       # (header, txs) — compact
+            self.core.recv_block(msg[1], msg[2], msg[3], outbox)   # compact + transfers
         elif msg[0] == "fullblock":
-            self.core.recv_fullblock(msg[1], msg[2], msg[3], outbox)   # (header,txs,payloads)
+            self.core.recv_fullblock(msg[1], msg[2], msg[3], msg[4], outbox)
         elif msg[0] == "getblock":
             self.core.serve_block(msg[1], outbox)              # peer needs a full block
         for m in outbox:
