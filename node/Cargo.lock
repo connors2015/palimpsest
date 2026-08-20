@@ -2314,10 +2314,12 @@ name = "palimpsest-node"
 version = "0.3.0"
 dependencies = [
  "argon2",
+ "async-trait",
  "axum",
  "base64",
  "clap",
  "crypto_secretbox",
+ "futures",
  "hex",
  "libp2p",
  "palimpsest-core",

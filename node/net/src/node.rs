@@ -24,11 +24,60 @@ use tracing::{debug, info, warn};
 
 pub const INCLUDE_K: usize = 8;
 
+/// Length-prefixed JSON sync codec with explicit large limits — the stock JSON
+/// codec caps responses ~10MB, but an 86M-model compressed payload is ~18MB.
+#[derive(Clone, Default)]
+pub struct BigJsonCodec;
+
+const SYNC_REQ_MAX: u64 = 16 * 1024 * 1024;
+const SYNC_RESP_MAX: u64 = 512 * 1024 * 1024;
+
+#[async_trait::async_trait]
+impl request_response::Codec for BigJsonCodec {
+    type Protocol = StreamProtocol;
+    type Request = SyncRequest;
+    type Response = SyncResponse;
+
+    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T)
+        -> std::io::Result<SyncRequest>
+    where T: futures::AsyncRead + Unpin + Send {
+        use futures::AsyncReadExt;
+        let mut buf = Vec::new();
+        io.take(SYNC_REQ_MAX).read_to_end(&mut buf).await?;
+        serde_json::from_slice(&buf).map_err(std::io::Error::other)
+    }
+
+    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T)
+        -> std::io::Result<SyncResponse>
+    where T: futures::AsyncRead + Unpin + Send {
+        use futures::AsyncReadExt;
+        let mut buf = Vec::new();
+        io.take(SYNC_RESP_MAX).read_to_end(&mut buf).await?;
+        serde_json::from_slice(&buf).map_err(std::io::Error::other)
+    }
+
+    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: SyncRequest)
+        -> std::io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        use futures::AsyncWriteExt;
+        io.write_all(&serde_json::to_vec(&req)?).await?;
+        io.close().await
+    }
+
+    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, resp: SyncResponse)
+        -> std::io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        use futures::AsyncWriteExt;
+        io.write_all(&serde_json::to_vec(&resp)?).await?;
+        io.close().await
+    }
+}
+
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub identify: identify::Behaviour,
-    pub sync: request_response::json::Behaviour<SyncRequest, SyncResponse>,
+    pub sync: request_response::Behaviour<BigJsonCodec>,
     pub autonat: autonat::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub relay_client: relay::client::Behaviour,
@@ -52,10 +101,11 @@ pub fn behaviour(
             gossipsub::MessageAuthenticity::Signed(key.clone()), gs_cfg).unwrap(),
         identify: identify::Behaviour::new(identify::Config::new(
             "/palimpsest/1.0.0".into(), key.public())),
-        sync: request_response::json::Behaviour::new(
+        sync: request_response::Behaviour::with_codec(
+            BigJsonCodec,
             [(StreamProtocol::new("/palimpsest/sync/1"), ProtocolSupport::Full)],
             request_response::Config::default()
-                .with_request_timeout(Duration::from_secs(120)),
+                .with_request_timeout(Duration::from_secs(300)),
         ),
         autonat: autonat::Behaviour::new(peer_id, autonat::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
@@ -386,6 +436,18 @@ pub async fn run(
                 let round = ((now() - node.t0 - jitter) / node.cfg.interval).floor() as i64;
                 if node.cfg.produce && round >= 0 && round != node.last_proposed_round {
                     node.last_proposed_round = round;
+                    // republish unconfirmed deltas for the current height: a
+                    // publish can silently fail before the gossip mesh forms
+                    // (InsufficientPeers), so retry each round until included
+                    let hh = node.head_height();
+                    let resend: Vec<(WireDeltaTx, Payload)> = node.delta_pool.values()
+                        .filter(|t| t.base_height == hh)
+                        .filter_map(|t| node.payloads.get(&t.txid())
+                            .map(|p| (WireDeltaTx::from_core(t), p.clone())))
+                        .collect();
+                    for (tx, payload) in resend {
+                        node.publish(&mut swarm, &Gossip::Dtx { tx, payload });
+                    }
                     // train EVERY round (the delta gossips to whoever proposes);
                     // proposing itself may rotate (devnet) or be open (mainnet)
                     if node.bridge_synced && !node.train_inflight {
