@@ -31,6 +31,7 @@ pub enum ApiCmd {
     Chat(String, oneshot::Sender<Value>),
     Upload(Vec<u8>, u64, String, oneshot::Sender<Value>),
     SubmitAccountTx(Value, oneshot::Sender<Value>),
+    Metrics(oneshot::Sender<String>),
 }
 
 #[derive(Clone)]
@@ -119,6 +120,15 @@ async fn dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(PAGE)
 }
 
+/// Prometheus text-format metrics (open by design — read-only operational data).
+async fn metrics(State(api): State<Api>) -> String {
+    let (otx, orx) = oneshot::channel();
+    if api.tx.send(ApiCmd::Metrics(otx)).await.is_err() {
+        return String::new();
+    }
+    orx.await.unwrap_or_default()
+}
+
 fn tag(kind: &str, mut body: Value) -> Value {
     body["kind"] = json!(kind);
     body
@@ -146,6 +156,7 @@ pub async fn run(bind: String, port: u16, admin_token: Option<String>,
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/status", get(status))
+        .route("/metrics", get(metrics))
         .route("/balance", get(balance))
         .route("/chain", get(chain))
         .route("/miners", get(miners))

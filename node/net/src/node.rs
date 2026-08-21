@@ -609,6 +609,30 @@ impl Node {
         })
     }
 
+    /// Prometheus text-format snapshot of node health for scraping/alerting.
+    fn api_metrics(&self) -> String {
+        let led = self.tree.head_ledger();
+        let g = |help: &str, name: &str, v: u64| {
+            format!("# HELP palimpsest_{name} {help}\n# TYPE palimpsest_{name} gauge\n\
+                     palimpsest_{name} {v}\n")
+        };
+        [
+            g("chain head height", "height", self.head_height()),
+            g("connected peers", "peers", self.peers_connected as u64),
+            g("delta mempool size", "delta_pool", self.delta_pool.len() as u64),
+            g("account mempool size", "account_pool", self.account_pool.len() as u64),
+            g("orphan blocks awaiting parents/payloads", "pending_blocks",
+              self.pending.len() as u64),
+            g("dedup set size", "seen", self.seen.len() as u64),
+            g("total token supply (grains)", "supply_grains", led.supply()),
+            g("1 if this node produces blocks", "producer", self.cfg.produce as u64),
+            g("1 if a training bridge is attached", "model_attached",
+              self.bridge_synced as u64),
+            g("1 if a training round is in flight", "train_inflight",
+              self.train_inflight as u64),
+        ].concat()
+    }
+
     fn api_balance(&self, addr: &str) -> Value {
         let led = self.tree.head_ledger();
         json!({"addr": addr, "grains": led.balance(addr),
@@ -878,6 +902,7 @@ pub async fn run(
             },
             Some(cmd) = api_rx.recv() => match cmd {
                 ApiCmd::Status(o) => { let _ = o.send(node.api_status()); }
+                ApiCmd::Metrics(o) => { let _ = o.send(node.api_metrics()); }
                 ApiCmd::Balance(addr, o) => { let _ = o.send(node.api_balance(&addr)); }
                 ApiCmd::Registry(o) => { let _ = o.send(node.api_registry()); }
                 ApiCmd::Chain(o) => { let _ = o.send(node.api_chain()); }
