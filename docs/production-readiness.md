@@ -49,7 +49,9 @@ mainnet. This maps every hardening task to its state and gates each phase.
   slashing on proven fraud couples to scoring (testnet)
 - 📐 Byzantine-robust aggregation at low miner counts (110)
 - 📐 Dtx cross-inclusion (anti-censorship) (114)
-- 📐 Verified fee-bearing inference + receipts (116)
+- ✅ Fee-bearing inference receipts (116) — on-chain fee payer→server + receipt
+  done + golden-tested; off-chain output attestation is the challenge-market
+  extension (testnet)
 
 **Phase-1 mitigation:** run invite-only with known miners so the missing delta
 scoring can't be exploited; keep mutating API endpoints token-gated/disabled.
@@ -81,9 +83,12 @@ environment; the readiness gate for each is the testnet, not a golden vector.
   instead of hard-stopping on a missing body (tested: recover from K, fail below
   K; devnet converges with live dispersal). The multi-node piece — distributing
   shards across peers + availability-sampling over gossip — is the testnet extension.
-- 114 Dtx cross-inclusion — needs the gossip/scoring layer
-- 115 chunked sparse aggregation — a perf optimization validated at real scale
-- 116 verified fee-bearing inference — needs off-chain serving + attestation
+- 114 Dtx cross-inclusion — inherently a network property (a validator can only
+  expect a delta it *saw* gossiped); an anti-censorship challenge, not a hard
+  rule, so it validates on the testnet
+- 115 chunked sparse aggregation — a perf optimization whose benefit only shows
+  at real (86M) scale; the dense path is correct today
+- ✅ 116 fee-bearing inference DONE on-chain (see above)
 
 ## Phase gates
 - **Phase 1 (invite devnet): ✅ READY** — consensus safety complete (incl.
