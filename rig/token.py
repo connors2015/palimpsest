@@ -28,15 +28,35 @@ from .crypto import Key, frame, verify
 
 GRAIN = 10**9                      # grains per whole token
 
-# Emission schedule (reference constants; mainnet sets these at genesis ceremony)
+# Emission schedule (reference constants; mainnet sets these at genesis ceremony).
+# rev 6 (§9.3 adapted): Bitcoin-shaped halvings, but with a TAIL EMISSION instead
+# of a hard sunset-to-zero. The chain's miners do useful work (training) that must
+# continue forever, so — like Monero, unlike Bitcoin — the reward floors at the
+# final epoch's value permanently: a guaranteed perpetual training wage, with
+# inflation asymptoting to ~0%/yr. Schedule supply ≈ 99.9M tokens over the 10
+# halving epochs (~19 years at 60s blocks), then ~51k tokens/yr tail (~0.05%/yr,
+# declining forever).
 BASE_REWARD = 50 * GRAIN           # per block at height 1
-HALVING_BLOCKS = 100_000           # reward halves every N blocks
-SUNSET_HEIGHT = 1_000_000          # hard stop: no emission at/after this height
+HALVING_BLOCKS = 1_000_000         # reward halves every N blocks (~2 yrs at 60s)
+TAIL_EPOCH = 9                     # after this many halvings the reward stops
+TAIL_REWARD = BASE_REWARD >> TAIL_EPOCH  # ≈0.0977 token/block, forever
 
-# Reward split, in basis points (must sum to 10_000)
+# Block-reward split, in basis points (must sum to 10_000)
 SHARE_MINERS = 7_000               # split equally among the block's delta miners
 SHARE_PROPOSER = 1_000             # the block proposer
 SHARE_DATA = 2_000                 # the data contributors whose corpus trained it
+
+# Inference-fee split, in basis points (must sum to 10_000). rev 6: usage revenue
+# funds ALL THREE public goods, not just serving — this is what makes "train
+# forever" solvent after emission tapers. The server is paid instantly (it bore
+# the serving compute, and absorbs division dust so the split is supply-exact);
+# the data + training slices accumulate in on-chain pool balances, drained every
+# block to that block's provenance-named data owners and delta miners. When
+# sketch-based usage attribution lands (§8), only the data pool's distribution
+# rule changes — the flows are already live.
+FEE_SHARE_SERVER = 6_000           # the serving node, paid instantly
+FEE_SHARE_DATA = 2_000             # → fee_data_pool, drained to named data owners
+FEE_SHARE_TRAIN = 2_000            # → fee_train_pool, drained to delta miners
 
 # Data lane (rev 3): staked submission + challenge market (§7.2, §9A)
 CHALLENGE_WINDOW = 20              # blocks a challenge stays open for votes
@@ -56,10 +76,11 @@ def address(pub_hex: str) -> str:
 
 
 def emission(height: int) -> int:
-    """Deterministic block reward at a height. Halves; hard-stops at sunset."""
-    if height < 1 or height >= SUNSET_HEIGHT:
+    """Deterministic block reward at a height. Halves every HALVING_BLOCKS,
+    then floors at TAIL_REWARD forever (tail emission — never zero for h>=1)."""
+    if height < 1:
         return 0
-    return BASE_REWARD >> ((height - 1) // HALVING_BLOCKS)
+    return max(BASE_REWARD >> min((height - 1) // HALVING_BLOCKS, 62), TAIL_REWARD)
 
 
 @dataclass
@@ -224,6 +245,11 @@ class TokenLedger:
         # included deltas (the admission cost; slashable for proven fraud,
         # otherwise returned at maturity). §4.1
         self.bonds: dict[str, dict] = {}
+        # rev 6: inference-fee slices awaiting distribution — the data slice
+        # drains to the next block's provenance-named data owners, the training
+        # slice to its delta miners. Consensus state (in root + supply).
+        self.fee_data_pool: int = 0
+        self.fee_train_pool: int = 0
 
     def copy(self) -> "TokenLedger":
         led = TokenLedger()
@@ -234,6 +260,8 @@ class TokenLedger:
                               "votes_against": list(v["votes_against"])}
                           for k, v in self.challenges.items()}
         led.bonds = {k: dict(v) for k, v in self.bonds.items()}
+        led.fee_data_pool = self.fee_data_pool
+        led.fee_train_pool = self.fee_train_pool
         return led
 
     def seed_genesis_data(self, owner_addr: str, data_hash: str = "genesis"):
@@ -271,11 +299,17 @@ class TokenLedger:
         every registered entry every block. `data_addrs` is a legacy fallback
         (pre-rev-3 chains with no provenance)."""
         total = emission(height)
-        if total == 0:
+        if total == 0 and not self.fee_train_pool and not self.fee_data_pool:
             return
         miners_pool = total * SHARE_MINERS // 10_000
         proposer_cut = total * SHARE_PROPOSER // 10_000
         data_pool = total * SHARE_DATA // 10_000
+        # rev 6: drain the fee pools into this block's payouts when they have
+        # recipients (a block without miners / named data carries them forward).
+        # Division dust is burned, same doctrine as emission dust.
+        if miner_pubs and self.fee_train_pool:
+            miners_pool += self.fee_train_pool
+            self.fee_train_pool = 0
         if miner_pubs:
             each = miners_pool // len(miner_pubs)
             for pub in sorted(miner_pubs):                 # canonical order
@@ -289,6 +323,9 @@ class TokenLedger:
                          for e in self.registry.values() if e["status"] == "active"}
         paid = {h: w for h, w in (data_credits or {}).items()
                 if w > 0 and h in hash_to_owner}
+        if paid and self.fee_data_pool:
+            data_pool += self.fee_data_pool
+            self.fee_data_pool = 0
         if paid:
             wsum = sum(paid.values())
             for h in sorted(paid):                         # ∝ weight, dust burned
@@ -397,14 +434,20 @@ class TokenLedger:
             (ch["votes_for"] if tx.support else ch["votes_against"]).append(src)
             ch["votes_for"].sort(); ch["votes_against"].sort()   # canonical
         elif isinstance(tx, InferenceReceiptTx):
-            # a signed usage fee: the payer pays the serving node for an attested
-            # inference. Payment is authorized by the payer's signature; the
-            # committed output_hash/head_root are the on-chain receipt. Bad
-            # attestations are disputed off-chain via the challenge market.
+            # a signed usage fee: the payer pays for an attested inference. rev 6:
+            # the fee splits three ways — the serving node is paid instantly (and
+            # absorbs division dust, keeping the split supply-exact); the data and
+            # training slices accumulate in the fee pools, drained by the next
+            # block's reward to its provenance-named data owners + delta miners.
+            # This is what funds training + data from USAGE once emission tapers.
             if tx.fee <= 0 or self.balances.get(src, 0) < tx.fee:
                 return False
             self.balances[src] -= tx.fee
-            self._credit(tx.server_addr, tx.fee)
+            data_cut = tx.fee * FEE_SHARE_DATA // 10_000
+            train_cut = tx.fee * FEE_SHARE_TRAIN // 10_000
+            self._credit(tx.server_addr, tx.fee - data_cut - train_cut)
+            self.fee_data_pool += data_cut
+            self.fee_train_pool += train_cut
         else:
             return False
         self.nonces[src] = tx.nonce + 1
@@ -441,13 +484,16 @@ class TokenLedger:
         (balances, nonces, data registry, open challenges). sort_keys sorts every
         nested dict; vote lists are kept sorted at mutation time."""
         blob = json.dumps({"balances": self.balances, "bonds": self.bonds,
-                           "challenges": self.challenges, "nonces": self.nonces,
-                           "registry": self.registry},
+                           "challenges": self.challenges,
+                           "fee_data_pool": self.fee_data_pool,
+                           "fee_train_pool": self.fee_train_pool,
+                           "nonces": self.nonces, "registry": self.registry},
                           sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(blob).hexdigest()
 
     def supply(self) -> int:
-        return sum(self.balances.values())
+        # pool balances are minted/paid tokens in flight, so they count
+        return sum(self.balances.values()) + self.fee_data_pool + self.fee_train_pool
 
 
 def _tx_sender(tx) -> str:

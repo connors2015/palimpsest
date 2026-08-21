@@ -3,8 +3,8 @@ reward splits, signed transfers with nonces, and canonical roots."""
 
 from rig.crypto import Key
 from rig.token import (
-    BASE_REWARD, GRAIN, HALVING_BLOCKS, SUNSET_HEIGHT, TokenLedger, TransferTx,
-    address, emission,
+    BASE_REWARD, GRAIN, HALVING_BLOCKS, TAIL_EPOCH, TAIL_REWARD, TokenLedger,
+    TransferTx, address, emission,
 )
 
 
@@ -17,14 +17,17 @@ def test_fair_launch_genesis_is_empty():
     assert led.supply() == 0                       # no premine, ever
 
 
-def test_emission_halves_and_sunsets():
+def test_emission_halves_then_tails():
     assert emission(0) == 0                        # genesis mints nothing
     assert emission(1) == BASE_REWARD
     assert emission(HALVING_BLOCKS) == BASE_REWARD
     assert emission(HALVING_BLOCKS + 1) == BASE_REWARD // 2
     assert emission(2 * HALVING_BLOCKS + 1) == BASE_REWARD // 4
-    assert emission(SUNSET_HEIGHT) == 0            # the non-amendable cap
-    assert emission(SUNSET_HEIGHT + 10**6) == 0
+    # rev 6 tail emission: the reward floors at TAIL_REWARD and NEVER reaches
+    # zero — the perpetual training wage ("train forever" is funded by design)
+    assert emission(TAIL_EPOCH * HALVING_BLOCKS + 1) == TAIL_REWARD
+    assert emission(100 * HALVING_BLOCKS) == TAIL_REWARD
+    assert emission(10**12) == TAIL_REWARD > 0     # no height ever emits zero
 
 
 def test_reward_split_deterministic_and_supply_bounded():
