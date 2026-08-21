@@ -11,6 +11,18 @@ block data share, and face an on-chain challenge market. The token is native
 chain state — fair-launched, emissions halving to a hard sunset, every grain
 minted by verifiable work.
 
+> **Status — honest map.** This is an active Phase-0/1 project. What is
+> *enforced in the shipping node today* versus what is *designed or testnet-phase*
+> is tracked precisely in **[docs/production-readiness.md](docs/production-readiness.md)**
+> and **[docs/internal/threat-model.md](docs/internal/threat-model.md)**. In
+> short: all consensus-safety and runtime hardening, verifiable VRF proposer
+> sortition + non-forgeable work, Byzantine-robust aggregation, erasure-coded
+> multi-node data availability, the stake-bond admission cost, and fee-bearing
+> inference are implemented and pinned to the reference by golden vectors. Delta
+> loss-scoring, cross-inclusion, and the threshold-BLS beacon remain testnet-phase
+> (they need live compute + a running network). Launch is phased: invite-only
+> devnet → testnet → open mainnet.
+
 ## The map
 
 | Path | What it is |

@@ -86,8 +86,10 @@ environment; the readiness gate for each is the testnet, not a golden vector.
 - 114 Dtx cross-inclusion — inherently a network property (a validator can only
   expect a delta it *saw* gossiped); an anti-censorship challenge, not a hard
   rule, so it validates on the testnet
-- 115 chunked sparse aggregation — a perf optimization whose benefit only shows
-  at real (86M) scale; the dense path is correct today
+- ✅ 115 chunked sparse aggregation DONE: Payload::dense_range + chunked_aggregate
+  (bit-identical to dense trimmed_mean, golden-proven) wired into the producer,
+  halving its delta memory. The validator-side lazy-body refactor (so verifiers
+  also skip dense materialization) is the scale follow-on.
 - ✅ 116 fee-bearing inference DONE on-chain (see above)
 
 ## Phase gates
