@@ -26,6 +26,9 @@ pub enum ApiCmd {
     Balance(String, oneshot::Sender<Value>),
     Registry(oneshot::Sender<Value>),
     Chain(oneshot::Sender<Value>),
+    Miners(oneshot::Sender<Value>),
+    Chat(String, oneshot::Sender<Value>),
+    Upload(Vec<u8>, u64, String, oneshot::Sender<Value>),
     SubmitAccountTx(Value, oneshot::Sender<Value>),
 }
 
@@ -63,6 +66,26 @@ async fn chain(State(api): State<Api>) -> Json<Value> {
     ask(&api.tx, ApiCmd::Chain).await
 }
 
+async fn miners(State(api): State<Api>) -> Json<Value> {
+    ask(&api.tx, ApiCmd::Miners).await
+}
+
+async fn chat(State(api): State<Api>, Json(b): Json<Value>) -> Json<Value> {
+    let prompt = b["prompt"].as_str().unwrap_or("").chars().take(1000).collect();
+    ask(&api.tx, |o| ApiCmd::Chat(prompt, o)).await
+}
+
+async fn upload(
+    State(api): State<Api>,
+    Query(q): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Json<Value> {
+    let stake = q.get("stake").and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
+    let grains = (stake * 1e9) as u64;
+    let media = q.get("media").cloned().unwrap_or_else(|| "text".into());
+    ask(&api.tx, |o| ApiCmd::Upload(body.to_vec(), grains, media, o)).await
+}
+
 async fn dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(PAGE)
 }
@@ -94,11 +117,15 @@ pub async fn run(port: u16, tx: mpsc::Sender<ApiCmd>) {
         .route("/status", get(status))
         .route("/balance", get(balance))
         .route("/chain", get(chain))
+        .route("/miners", get(miners))
+        .route("/chat", post(chat))
+        .route("/upload", post(upload))
         .route("/data/registry", get(registry))
         .route("/transfer", post(transfer))
         .route("/data/submit", post(data_submit))
         .route("/data/challenge", post(data_challenge))
         .route("/data/vote", post(data_vote))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(Api { tx });
     // retry the bind: fast restarts leave the old socket lingering briefly, and
     // a silently-dead API made live nodes look wedged during the rehearsal
@@ -118,7 +145,7 @@ pub async fn run(port: u16, tx: mpsc::Sender<ApiCmd>) {
 /// The always-on chain dashboard, served by the node itself at `/`.
 const PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>palimpsest · chain</title>
+<title>palimpsest &middot; chain</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#129504;</text></svg>">
 <style>
 :root{--bg:#0a0d12;--s:#111721;--s2:#0d1219;--ink:#dbe4ee;--mut:#6d7f92;--line:#1d2836;
@@ -152,8 +179,25 @@ padding:8px 10px;min-width:96px;text-align:center}
 table{width:100%;border-collapse:collapse;font-size:12.5px}
 td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);color:var(--mut)}
 th{text-transform:uppercase;font-size:10.5px;letter-spacing:.08em}
-td.hi{color:var(--ink)}
+td.hi{color:var(--ink)}td.me{color:var(--a)}
 .note{color:var(--mut);font-size:11.5px;margin-top:8px}
+#chatlog{max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
+.msg{border-radius:10px;padding:10px 12px;max-width:88%;white-space:pre-wrap;word-break:break-word}
+.msg.you{align-self:flex-end;background:#1a2436;border:1px solid #263650}
+.msg.model{align-self:flex-start;background:var(--s2);border:1px solid var(--line)}
+.msg .stamp{display:block;margin-top:6px;color:var(--a2);font-size:10.5px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input[type=text],input[type=number]{background:var(--s2);border:1px solid var(--line);
+border-radius:9px;color:var(--ink);font-family:var(--mono);font-size:14px;padding:10px 12px;outline:none}
+input[type=text]{flex:1;min-width:200px}
+input[type=text]:focus{border-color:var(--a)}
+input[type=number]{width:110px}
+input[type=file]{color:var(--mut);font-size:12px}
+button{background:var(--a);color:#04120f;border:0;border-radius:9px;padding:10px 18px;
+font-family:var(--mono);font-weight:700;cursor:pointer;font-size:13px}
+button:disabled{opacity:.5}
+select{background:var(--s2);border:1px solid var(--line);border-radius:9px;color:var(--ink);
+font-family:var(--mono);padding:10px}
 </style></head><body><div class="wrap">
 <header><h1><span id="dot"></span><b>palimpsest</b> chain</h1>
 <div id="sub">connecting&hellip;</div></header>
@@ -161,59 +205,104 @@ td.hi{color:var(--ink)}
  <div class="stat"><div class="k">height</div><div class="v" id="height">&ndash;</div></div>
  <div class="stat"><div class="k">head</div><div class="v small" id="head">&ndash;</div></div>
  <div class="stat"><div class="k">total supply</div><div class="v" id="supply">&ndash;</div></div>
- <div class="stat"><div class="k">founder balance</div><div class="v" id="founder">&ndash;</div></div>
+ <div class="stat"><div class="k">peers</div><div class="v" id="peers">&ndash;</div></div>
  <div class="stat"><div class="k">delta mempool</div><div class="v" id="dpool">&ndash;</div></div>
- <div class="stat"><div class="k">account mempool</div><div class="v" id="apool">&ndash;</div></div>
+ <div class="stat"><div class="k">model</div><div class="v small" id="model">&ndash;</div></div>
 </div>
 <div class="panel"><h2>chain &mdash; newest blocks land on the right</h2><div id="blocks"></div></div>
-<div class="panel"><h2>data registry &mdash; who feeds the model, and their stake</h2>
-<table id="reg"><thead><tr><th>entry</th><th>owner</th><th>type</th><th>size</th>
-<th>stake</th><th>weight</th><th>status</th></tr></thead><tbody></tbody></table>
-<div class="note">every block: 70% of emission to that block's miners &middot; 10% to the
-proposer &middot; 20% split across these entries by weight. entries are challengeable
-(stake vs stake) &mdash; this table is the data economy, live.</div></div>
-<div class="note" style="margin-top:14px">this dashboard is served by the seed node
-itself &mdash; the same process that relays the network. chat-with-the-model arrives
-when the serving lane lands on the rust node.</div>
+<div class="panel"><h2>our nodes &mdash; who does the work</h2>
+<table id="miners"><thead><tr><th>miner</th><th>blocks proposed</th><th>deltas</th>
+<th>share</th><th>earned</th><th>last seen</th></tr></thead><tbody></tbody></table>
+<div class="note">computed from chain history: every block\u2019s proposer and every
+delta\u2019s signer, with earnings from the live ledger. \u201cme\u201d = this node.</div></div>
+<div class="panel"><h2>talk to the model at the head</h2>
+<div id="chatlog"></div>
+<div class="bar"><input type="text" id="prompt" placeholder="say something to the chain&hellip;"
+ autocomplete="off"><button id="send">send</button></div>
+<div class="note" id="chatnote">replies are generated from the exact weights the chain agrees
+on right now, stamped with their block. on a CPU-only seed a reply can take a minute.</div></div>
+<div class="panel"><h2>upload data to the chain</h2>
+<div class="bar">
+ <input type="file" id="file">
+ <select id="media"><option>text</option><option>csv</option><option>code</option>
+ <option>image</option><option>other</option></select>
+ <input type="number" id="stake" value="1" min="0.1" step="0.1" title="stake (PALIMPSEST)">
+ <button id="up">upload + stake</button>
+</div>
+<div class="note" id="upnote">the node stores the bytes (content-addressed) and submits a
+STAKED registry entry signed by its own wallet &mdash; it earns the data share by weight and
+is challengeable like any entry. dev mode: needs this node\u2019s wallet to hold the stake.</div></div>
 </div><script>
-var FOUNDER='3432d48fd6878b4f2e7a1e40cc15e112c512fae7';
 var lastH=-1;
 function g(u){return fetch(u).then(function(r){return r.json()})}
 function poll(){
- Promise.all([g('/status'),g('/chain'),g('/balance?addr='+FOUNDER),g('/data/registry')])
+ Promise.all([g('/status'),g('/chain'),g('/miners')])
  .then(function(rs){
-  var s=rs[0],c=rs[1],b=rs[2],reg=rs[3];
+  var s=rs[0],c=rs[1],m=rs[2];
   document.getElementById('dot').className='';
   document.getElementById('sub').textContent=(s.producer?'producer':'seed / relay')+
-    ' node · live · miner '+String(s.miner).slice(0,10)+'…';
+    ' node \u00b7 live \u00b7 '+String(s.miner).slice(0,10)+'\u2026';
   document.getElementById('height').textContent=s.height;
   document.getElementById('head').textContent=String(s.head).slice(0,14);
   document.getElementById('supply').textContent=(s.supply/1e9).toLocaleString();
-  document.getElementById('founder').textContent=(b.grains/1e9).toLocaleString();
+  document.getElementById('peers').textContent=s.peers;
   document.getElementById('dpool').textContent=s.delta_pool;
-  document.getElementById('apool').textContent=s.account_pool;
+  document.getElementById('model').textContent=s.model_attached?'attached':'none';
   var bl=document.getElementById('blocks');bl.innerHTML='';
   (c.blocks||[]).forEach(function(x){
     var d=document.createElement('div');
     d.className='blk'+(x.height===s.height&&s.height!==lastH?' new':'');
     d.innerHTML='<div class="h">#'+x.height+'</div><div class="r">'+
       String(x.hash).slice(0,10)+'</div><div class="t">'+x.n_txs+
-      ' Δ · '+String(x.proposer).slice(0,8)+'</div>';
+      ' \u0394 \u00b7 '+String(x.proposer).slice(0,8)+'</div>';
     bl.appendChild(d)});
   bl.scrollLeft=bl.scrollWidth;lastH=s.height;
-  var tb=document.querySelector('#reg tbody');tb.innerHTML='';
-  var R=reg.registry||{};
-  Object.keys(R).forEach(function(id){var e=R[id];
+  var tb=document.querySelector('#miners tbody');tb.innerHTML='';
+  (m.miners||[]).forEach(function(x){
     var tr=document.createElement('tr');
-    tr.innerHTML='<td class="hi">'+id.slice(0,12)+'</td><td>'+
-      String(e.owner).slice(0,12)+'&hellip;</td><td>'+e.media_type+'</td><td>'+
-      (e.size||0).toLocaleString()+'</td><td>'+((e.stake||0)/1e9).toLocaleString()+
-      '</td><td>'+((e.weight||0)/1e6).toLocaleString()+'M</td><td class="hi">'+
-      e.status+'</td>';
+    var name=String(x.miner).slice(0,12)+'\u2026'+(x.is_me?' (me)':'');
+    tr.innerHTML='<td class="'+(x.is_me?'me':'hi')+'">'+name+'</td><td>'+
+      x.blocks_proposed+'</td><td>'+x.deltas+'</td><td>'+x.share_pct+
+      '%</td><td class="hi">'+(x.balance/1e9).toLocaleString()+'</td><td>h'+
+      x.last_height+'</td>';
     tb.appendChild(tr)});
  }).catch(function(){
   document.getElementById('dot').className='dead';
-  document.getElementById('sub').textContent='disconnected… retrying';
+  document.getElementById('sub').textContent='disconnected\u2026 retrying';
  })}
+function send(){
+ var inp=document.getElementById('prompt'),btn=document.getElementById('send');
+ var p=inp.value.trim();if(!p)return;inp.value='';btn.disabled=true;
+ var log=document.getElementById('chatlog');
+ var me=document.createElement('div');me.className='msg you';me.textContent=p;
+ log.appendChild(me);log.scrollTop=log.scrollHeight;
+ fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({prompt:p})}).then(function(r){return r.json()})
+ .then(function(a){
+  var d=document.createElement('div');d.className='msg model';
+  d.textContent=a.ok?a.reply:('\u26a0 '+a.error);
+  if(a.ok){var st=document.createElement('span');st.className='stamp';
+   st.textContent='\u2014 head @ block #'+a.height;d.appendChild(st)}
+  log.appendChild(d);log.scrollTop=log.scrollHeight;btn.disabled=false;
+ }).catch(function(){btn.disabled=false})}
+document.getElementById('send').onclick=send;
+document.getElementById('prompt').addEventListener('keydown',function(e){
+ if(e.key==='Enter')send()});
+document.getElementById('up').onclick=function(){
+ var f=document.getElementById('file').files[0];
+ var note=document.getElementById('upnote');
+ if(!f){note.textContent='pick a file first';return}
+ if(f.size>60*1024*1024){note.textContent='dev limit: 60MB per upload';return}
+ var stake=document.getElementById('stake').value;
+ var media=document.getElementById('media').value;
+ note.textContent='uploading '+f.name+' ('+f.size.toLocaleString()+' bytes)\u2026';
+ f.arrayBuffer().then(function(buf){
+  return fetch('/upload?stake='+stake+'&media='+media,
+    {method:'POST',body:buf})
+ }).then(function(r){return r.json()}).then(function(a){
+  note.textContent=a.ok?('\u2713 custodied + staked: '+a.data_hash.slice(0,16)+
+    '\u2026 (tx '+a.txid.slice(0,12)+'\u2026, settles next block)')
+    :('\u26a0 '+a.error+(a.hint?' \u2014 '+a.hint:''));
+ }).catch(function(e){note.textContent='upload failed: '+e})};
 poll();setInterval(poll,5000);
 </script></body></html>"#;

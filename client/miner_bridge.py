@@ -124,6 +124,28 @@ def run(a):
                                  "payload": _payload_json(payload)})
                     print(f"h{want_h}: trained {a.inner}x{a.batch}, "
                           f"loss {loss:.3f}", flush=True)
+                elif t == "generate":
+                    # serve chat from the chain-synced model (works on any
+                    # bridge; a --produce-less node makes this a pure server)
+                    import torch
+                    if state is None:
+                        _send(sock, {"t": "generated", "height": -1,
+                                     "text": "(model not yet synced)"})
+                        continue
+                    raw = str(msg.get("prompt", " ")).encode("utf-8")
+                    raw = raw[-(model.cfg.block_size - 1):] or b" "
+                    n_new = min(int(msg.get("n", 120)), 240)
+                    idx = torch.tensor([list(raw)], dtype=torch.long,
+                                       device=device)
+                    model.eval()
+                    with torch.no_grad():
+                        out = model.generate(idx, n_new, temperature=0.85)
+                    model.train()
+                    text = bytes(out[0].tolist()[len(raw):]).decode(
+                        "utf-8", errors="replace")
+                    _send(sock, {"t": "generated", "height": height,
+                                 "text": text})
+                    print(f"h{height}: generated {n_new} bytes", flush=True)
         except (ConnectionError, OSError) as e:
             print(f"bridge disconnected ({e}); retrying…", flush=True)
             time.sleep(2)

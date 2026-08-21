@@ -151,6 +151,9 @@ pub struct Node {
     /// per-peer timestamp of the last sync we requested — heartbeat-triggered
     /// catch-up must not stack concurrent multi-hundred-MB transfers
     pub last_sync_req: HashMap<PeerId, f64>,
+    pub peers_connected: usize,
+    pub chat_pending: Vec<tokio::sync::oneshot::Sender<Value>>,
+    pub chat_inflight: bool,
 }
 
 impl Node {
@@ -397,6 +400,8 @@ impl Node {
             "pending_blocks": self.pending.len(),
             "producer": self.cfg.produce,
             "miner": self.key.pub_hex(),
+            "peers": self.peers_connected,
+            "model_attached": self.bridge_synced,
         })
     }
 
@@ -410,6 +415,79 @@ impl Node {
     fn api_registry(&self) -> Value {
         let led = self.tree.head_ledger();
         json!({"registry": led.registry, "challenges": led.challenges})
+    }
+
+    fn api_miners(&self) -> Value {
+        // work accounting straight from chain history: for every miner ever
+        // seen, blocks proposed, deltas contributed, tokens earned, last height
+        use palimpsest_core::token::address;
+        let mut stats: HashMap<String, (u64, u64, u64)> = HashMap::new(); // pub -> (proposed, deltas, last_h)
+        for sb in self.blocks_full.values() {
+            let h = sb.header.height;
+            if sb.header.proposer != "genesis" {
+                let e = stats.entry(sb.header.proposer.clone()).or_default();
+                e.0 += 1;
+                e.2 = e.2.max(h);
+            }
+            for t in &sb.txs {
+                let e = stats.entry(t.miner.clone()).or_default();
+                e.1 += 1;
+                e.2 = e.2.max(h);
+            }
+        }
+        let led = self.tree.head_ledger();
+        let total_blocks = self.head_height().max(1);
+        let mut miners: Vec<Value> = stats.into_iter().map(|(pub_hex, (p, d, lh))| {
+            let addr = address(&pub_hex);
+            json!({"miner": pub_hex, "address": addr,
+                   "blocks_proposed": p, "deltas": d, "last_height": lh,
+                   "balance": led.balance(&addr),
+                   "share_pct": (p as f64 * 100.0 / total_blocks as f64).round(),
+                   "is_me": pub_hex == self.key.pub_hex()})
+        }).collect();
+        miners.sort_by_key(|m| std::cmp::Reverse(m["blocks_proposed"].as_u64().unwrap_or(0)));
+        json!({"miners": miners, "peers_connected": self.peers_connected,
+               "head_height": self.head_height()})
+    }
+
+    fn api_upload(&mut self, bytes: Vec<u8>, stake: u64, media: String) -> (Value, Option<Gossip>) {
+        use palimpsest_core::token::{address, AccountTx, DataSubmitTx};
+        if bytes.is_empty() {
+            return (json!({"ok": false, "error": "empty file"}), None);
+        }
+        let hash = core::delta_hash(&bytes);
+        if let Err(e) = self.store.save_upload(&hash, &bytes) {
+            return (json!({"ok": false, "error": format!("store: {e}")}), None);
+        }
+        let led = self.tree.head_ledger();
+        let my_addr = address(&self.key.pub_hex());
+        if led.balance(&my_addr) < stake {
+            return (json!({"ok": false,
+                "error": format!("node wallet balance {} < stake {}",
+                                 led.balance(&my_addr), stake),
+                "data_hash": hash,
+                "hint": "file is custodied; submit on-chain from a funded wallet \
+                         with: wallet submit-data"}), None);
+        }
+        let mut tx = DataSubmitTx {
+            owner_pub: self.key.pub_hex(),
+            data_hash: hash.clone(),
+            size_bytes: bytes.len() as u64,
+            media_type: media,
+            stake,
+            nonce: *led.nonces.get(&my_addr).unwrap_or(&0),
+            sig: vec![],
+        };
+        tx.sig = self.key.sign(&AccountTx::DataSubmit(tx.clone()).signing_bytes());
+        let atx = AccountTx::DataSubmit(tx);
+        match self.accept_account_tx(atx.clone()) {
+            Some(txid) => (json!({"ok": true, "txid": txid, "data_hash": hash,
+                                  "bytes": bytes.len(),
+                                  "status": "custodied + staked submission in mempool"}),
+                           Some(Gossip::Atx { tx: account_tx_to_json(&atx) })),
+            None => (json!({"ok": false, "error": "tx rejected (duplicate?)",
+                            "data_hash": hash}), None),
+        }
     }
 
     fn api_chain(&self) -> Value {
@@ -531,7 +609,19 @@ pub async fn run(
             Some(ev) = bridge_rx.recv() => match ev {
                 FromBridge::Connected | FromBridge::NeedState => {
                     node.train_inflight = false;
+                    node.chat_inflight = false;
+                    for tx in node.chat_pending.drain(..) {
+                        let _ = tx.send(json!({"ok": false,
+                            "error": "model reconnected — try again"}));
+                    }
                     node.send_bridge_state();
+                }
+                FromBridge::Generated { text, height } => {
+                    node.chat_inflight = false;
+                    if let Some(tx) = node.chat_pending.pop() {
+                        let _ = tx.send(json!({"ok": true, "reply": text,
+                                               "height": height}));
+                    }
                 }
                 FromBridge::Delta { height, loss, payload } => {
                     node.train_inflight = false;
@@ -564,6 +654,29 @@ pub async fn run(
                 ApiCmd::Balance(addr, o) => { let _ = o.send(node.api_balance(&addr)); }
                 ApiCmd::Registry(o) => { let _ = o.send(node.api_registry()); }
                 ApiCmd::Chain(o) => { let _ = o.send(node.api_chain()); }
+                ApiCmd::Miners(o) => { let _ = o.send(node.api_miners()); }
+                ApiCmd::Chat(prompt, o) => {
+                    if !node.bridge_synced {
+                        let _ = o.send(json!({"ok": false,
+                            "error": "no model attached to this node yet"}));
+                    } else if node.chat_inflight {
+                        let _ = o.send(json!({"ok": false,
+                            "error": "model is generating for someone else — try again"}));
+                    } else {
+                        node.chat_inflight = true;
+                        node.chat_pending.push(o);
+                        let _ = node.bridge_tx.try_send(ToBridge::Generate {
+                            prompt, n: 120,
+                        });
+                    }
+                }
+                ApiCmd::Upload(bytes, stake, media, o) => {
+                    let (reply, gossip) = node.api_upload(bytes, stake, media);
+                    if let Some(msg) = gossip {
+                        node.publish(&mut swarm, &msg);
+                    }
+                    let _ = o.send(reply);
+                }
                 ApiCmd::SubmitAccountTx(v, o) => {
                     let reply = match account_tx_from_json(&v) {
                         None => json!({"ok": false, "error": "malformed tx"}),
@@ -695,7 +808,11 @@ pub async fn run(
                         identify::Event::Received { peer_id, info, .. })) => {
                     debug!(%peer_id, agent = %info.agent_version, "peer identified");
                 }
+                SwarmEvent::ConnectionClosed { .. } => {
+                    node.peers_connected = node.peers_connected.saturating_sub(1);
+                }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    node.peers_connected += 1;
                     info!(%peer_id, "peer connected");
                     // opportunistic catch-up from every new peer — anchor BELOW
                     // our head: an equal-height fork needs the peer's blocks at

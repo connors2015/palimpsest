@@ -24,6 +24,7 @@ pub enum ToBridge {
     State { height: u64, state: Vec<i64> },
     Train { height: u64, seed: u64 },
     Advance { height: u64, sparse: SparseI64 },
+    Generate { prompt: String, n: u64 },
 }
 
 #[derive(Debug)]
@@ -31,6 +32,7 @@ pub enum FromBridge {
     Connected,
     Delta { height: u64, loss: f64, payload: Payload },
     NeedState,
+    Generated { text: String, height: u64 },
 }
 
 async fn write_frame<W: AsyncWriteExt + Unpin>(s: &mut W, bytes: &[u8]) -> std::io::Result<()> {
@@ -84,6 +86,12 @@ async fn serve_one(
                 Some("resync") => {
                     let _ = ev.send(FromBridge::NeedState).await;
                 }
+                Some("generated") => {
+                    let _ = ev.send(FromBridge::Generated {
+                        text: v["text"].as_str().unwrap_or("").to_string(),
+                        height: v["height"].as_u64().unwrap_or(0),
+                    }).await;
+                }
                 _ => {}
             }
         }
@@ -111,6 +119,10 @@ async fn serve_one(
                     }
                     ToBridge::Advance { height, sparse } => {
                         let m = json!({"t": "advance", "height": height, "sparse": sparse});
+                        write_frame(&mut wr, m.to_string().as_bytes()).await
+                    }
+                    ToBridge::Generate { prompt, n } => {
+                        let m = json!({"t": "generate", "prompt": prompt, "n": n});
                         write_frame(&mut wr, m.to_string().as_bytes()).await
                     }
                 };

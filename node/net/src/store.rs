@@ -47,6 +47,17 @@ impl Store {
             .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect())
     }
 
+    // ---- uploaded corpus files (DA custody for /upload submissions) ------
+    pub fn save_upload(&self, hash: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let dir = self.dir.join("uploads");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(hash);
+        if !path.exists() {
+            fs::write(path, bytes)?;
+        }
+        Ok(())
+    }
+
     // ---- payloads --------------------------------------------------------
     pub fn put_payload(&self, txid: &str, p: &Payload) {
         let path = self.dir.join("payloads").join(format!("{txid}.json"));
