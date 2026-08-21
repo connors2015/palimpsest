@@ -111,6 +111,8 @@ def run(a):
                     set_flat_params(model, dequantize(state))
                 elif t == "train":
                     want_h = int(msg["height"])
+                    if a.serve_only:
+                        continue                # this bridge only generates
                     if state is None or want_h != height:
                         _send(sock, {"t": "resync"})
                         continue
@@ -161,6 +163,8 @@ def main():
     ap.add_argument("--inner", type=int, default=10)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--serve-only", action="store_true",
+                    help="only answer generate requests; never submit deltas")
     run(ap.parse_args())
 
 
