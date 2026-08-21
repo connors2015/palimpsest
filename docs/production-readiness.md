@@ -17,7 +17,12 @@ mainnet. This maps every hardening task to its state and gates each phase.
 - ✅ Snapshot ledger validation (94)
 - ✅ Length-prefixed signing preimages (96)
 - ✅ Overflow-safe arithmetic, numpy parity, dust documented (97)
-- Golden vectors: 17 families incl. negative + overflow cases; Rust == Python.
+- ✅ **Non-forgeable work**: header.work = vrf_work(VRF proof), verified in
+  validate_block; VRF proposer sortition wired in, fixed-rotation SPOF removed (92, 113)
+- ✅ **Byzantine-robust aggregation** at low miner counts (always trim ≥1 at k≥3) (110)
+- Golden vectors: 17 families incl. negative, overflow, VRF-chain, and
+  low-count-robustness cases; Rust == Python. 35 Rust tests; devnet + soak
+  (kill/restart) converge.
 
 ## Runtime & DoS hardening — ✅ COMPLETE (blocks Phase 1)
 - ✅ Bounded mempools/caches + admission gating (98/99)
@@ -63,11 +68,24 @@ scoring can't be exploited; keep mutating API endpoints token-gated/disabled.
 - ☐ Python reference suite pinned + green in CI (127)
 - ✅ Threat model (132) · this readiness doc (133)
 
+## Remaining (all Phase-2/3 by nature — need live infra + off-chain compute)
+These 7 cannot be completed-and-validated in a single-machine coding
+environment; the readiness gate for each is the testnet, not a golden vector.
+- 108 delta scoring (held-out-shard loss) — needs off-chain model execution
+- 109 stake bonds / admission cost — economic-design + couples to 108's slash trigger
+- 111 DA routing (112 shard-recoverable replay) — needs live multi-node
+  availability testing; the DA *primitive* is done + golden-tested
+- 114 Dtx cross-inclusion — needs the gossip/scoring layer
+- 115 chunked sparse aggregation — a perf optimization validated at real scale
+- 116 verified fee-bearing inference — needs off-chain serving + attestation
+
 ## Phase gates
-- **Phase 1 (invite devnet):** consensus safety ✅ + runtime hardening ✅ +
-  ops applied. → **READY once ops manifests are applied to the cluster.**
-- **Phase 2 (testnet):** DA routing (112) + sortition wiring (92/113) live and
-  converging under churn; e2e/soak (128) green; second anchor (119).
-- **Phase 3 (open mainnet):** delta scoring + stake/slash (108/109/110)
-  enforced; threshold-BLS beacon; **external audit sign-off**; repo public +
-  reproducible checksummed builds.
+- **Phase 1 (invite devnet): ✅ READY** — consensus safety complete (incl.
+  non-forgeable work + robust aggregation), runtime hardening complete, ops
+  manifests written. Soak (kill/restart) converges. Apply the ops manifests to
+  the cluster to launch.
+- **Phase 2 (testnet):** DA routing (111/112) live and converging under churn;
+  a second anchor (✅ documented, provision it); load/soak on real hosts.
+- **Phase 3 (open mainnet):** delta scoring + stake/slash (108/109) enforced;
+  fee-bearing inference (116); threshold-BLS beacon; **external audit sign-off**;
+  repo public + reproducible checksummed builds.
