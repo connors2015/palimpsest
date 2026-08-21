@@ -66,6 +66,10 @@ struct Args {
     external_address: String, // advertise a known public multiaddr
     #[arg(long, default_value_t = 8)]
     prune_depth: u64,
+    /// shared round-clock origin (epoch seconds) — REQUIRED for --rotate to
+    /// align leader slots across machines; 0 = process start time
+    #[arg(long, default_value_t = 0.0)]
+    t0: f64,
 }
 
 /// Decrypt a pynacl-encrypted wallet: argon2id(MODERATE) -> XSalsa20-Poly1305.
@@ -208,8 +212,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bridge_tx: bridge_cmd_tx,
         bridge_synced: false,
         train_inflight: false,
-        t0: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),
+        t0: if args.t0 > 0.0 { args.t0 } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()
+        },
         last_proposed_round: -1,
         last_announced_round: -1,
         last_sync_req: Default::default(),
