@@ -104,3 +104,36 @@ asserts byte-identical convergence at exit. Golden vectors
 |---|---|---|
 | contabo-eu-1 (public, relay) | `/ip4/169.58.211.248/udp/9800/quic-v1` | `http://169.58.211.248:8080/status` |
 | cluster (private net) | `/ip4/10.0.1.1/udp/30980/quic-v1` | `http://10.0.1.1:30981/status` |
+
+## Production hardening
+
+**Two+ anchors (no single point of bootstrap/DA).** Run at least two seeds on
+separate hosts/regions, each with `--relay-server` and its own persistent
+volume, and list *both* in every node's `--peers`. The StatefulSet
+(`deploy/seed-node.yaml`) gives each replica its own PVC, so `replicas: 2`
+yields two independent anchors; add the second to the bootstrap table above. DA
+bodies should be retained on more than one anchor so losing one never loses a
+body.
+
+**API auth + exposure.** Mutating endpoints (`/upload`, `/chat`) require
+`PALIMPSEST_API_TOKEN` (a `Bearer` token) and are *disabled* if it is unset.
+Read + signed-tx endpoints are safe to expose. Restrict the bind interface with
+`--api-bind` where a public dashboard isn't wanted.
+
+**TLS in transit.** The node serves plain HTTP; signed transactions don't need
+TLS for authentication, but for confidentiality/integrity put a TLS-terminating
+reverse proxy in front of any public API and point the wallet at `https://`.
+Minimal Caddy:
+
+    api.example.com {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+Run the node with `--api-bind 127.0.0.1` so only the proxy reaches it.
+
+**Monitoring.** Scrape `GET /metrics` (Prometheus text). Load
+`deploy/monitoring/alerts.yml` for NodeDown / ChainStalled / pool-near-cap /
+sync-lag alerts.
+
+**Backup.** `deploy/backup-restore.sh backup <out>` takes a consistent snapshot;
+a restored node fast-boots.
