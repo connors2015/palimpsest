@@ -47,7 +47,9 @@ class AsyncGossipNode:
                  interval=0.4, t0=None):
         w0 = quantize(MODEL.init(np.random.default_rng(seed)))
         key = Key.generate(f"node{node_id}".encode().ljust(32, b"0"))
-        self.core = GossipNode(node_id, key, BlockTree(w0))
+        from .p2p import P2P_FOUNDER
+        self.core = GossipNode(node_id, key,
+                               BlockTree(w0, data_contributor=P2P_FOUNDER))
         self.host, self.port, self.peers = host, port, peers
         self.n_total, self.interval = n_total, interval
         self.t0 = t0 or time.time()

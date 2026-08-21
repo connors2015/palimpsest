@@ -82,7 +82,7 @@ def test_tampered_ledger_root_rejected(core):
     tx = list(core.mempool.values())[0]
     bodies = {tx.da_pointer: core._body(tx.txid())}
     blk = build_block(core.tree, core.tree.head, [tx], bodies,
-                      {tx.txid(): 1.0}, core.key.pub)
+                      {tx.txid(): 1.0}, core.key)
     blk.header.ledger_root = "00" * 32                 # lie about the token state
     with pytest.raises(ValidationError, match="ledger_root"):
         core.tree.add_block(blk)

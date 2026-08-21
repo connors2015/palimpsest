@@ -154,8 +154,15 @@ class RealCore:
         dense = decompress(payload)                            # what everyone commits to
         dh = delta_hash(dense.tobytes())
         ptr = f"da://{dh}"                                     # CONTENT address — unique per body
+        # rev 5 provenance: name the corpora this delta trained on. The sim
+        # trainer draws from the whole staked pool, so it names every ACTIVE
+        # registry corpus at its base height (at minimum the founding corpus).
+        led = self.tree.ledger[self.tree.head]
+        refs = sorted({e["data_hash"] for e in led.registry.values()
+                       if e["status"] == "active"}) or ["genesis"]
         tx = BackpropTx(miner=self.key.pub, base_height=hh, shard_id=self.node_id,
-                        delta_hash=dh, da_pointer=ptr).signed(self.key)
+                        delta_hash=dh, da_pointer=ptr,
+                        data_refs=refs).signed(self.key)
         if tx.txid() not in self.seen_tx:
             self.seen_tx.add(tx.txid())
             self.mempool[tx.txid()] = tx
@@ -202,8 +209,19 @@ class RealCore:
         from rig.token import TransferTx
         scratch = self.tree.ledger[head].copy()
         scratch.resolve_expired_challenges(hh + 1)
+        # mirror apply_ledger's rev-5 data credits so the dry-run ledger
+        # matches the validator's exactly (incl. rev-6 fee-pool drains)
+        hash_weight = {e["data_hash"]: e["weight"]
+                       for e in scratch.registry.values()
+                       if e["status"] == "active" and e["weight"] > 0}
+        credits: dict[str, int] = {}
+        for tx in accepted:
+            for r in tx.canonical_refs():
+                if r in hash_weight:
+                    credits[r] = credits.get(r, 0) + hash_weight[r]
         scratch.apply_reward(hh + 1, [tx.miner for tx in accepted], self.key.pub,
-                             [DATA_CONTRIBUTOR] if DATA_CONTRIBUTOR else [])
+                             [DATA_CONTRIBUTOR] if DATA_CONTRIBUTOR else [],
+                             data_credits=credits)
         jurors = self.tree.recent_proposers(head)
         xfers, dtxs = [], []
         for t in canonical_account_txs(list(self.data_pool.values()),
@@ -214,7 +232,7 @@ class RealCore:
             elif scratch.apply_data_tx(t, hh + 1, jurors):
                 dtxs.append(t)
         block = build_block(self.tree, head, accepted, bodies,
-                            {tx.txid(): 1.0 for tx in chosen}, self.key.pub,
+                            {tx.txid(): 1.0 for tx in chosen}, self.key,
                             transfers=xfers, data_txs=dtxs)
         try:
             became_head = self.tree.add_block(block)           # our own block; guard anyway

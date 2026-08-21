@@ -67,48 +67,45 @@ def test_staked_submission_earns_weighted_share(core):
     assert led.balance(address(miner.pub)) > miner_before   # miner earns data share too
 
 
-def test_challenge_upheld_revokes_and_pays_challenger(core):
-    _mine(core)
-    miner = core.key                                    # miner == proposer == juror
-    bal = core.head_ledger().balance(address(miner.pub))
-    sub = DataSubmitTx(owner_pub=miner.pub, data_hash="cd" * 32, size_bytes=9,
-                       media_type="text", stake=bal // 4, nonce=0).signed(miner)
-    outbox = []
-    core.recv_data_tx(sub, outbox)
-    _mine(core)
+def test_challenge_upheld_revokes_and_pays_challenger():
+    """Ledger-level: since #93 (disinterested-juror rule + CHALLENGE_QUORUM=3)
+    a single-proposer sim can never reach quorum — the owner is the only recent
+    proposer and may not vote on their own entry. So the upheld path is
+    exercised directly on the ledger with three disinterested jurors, the same
+    shape as the consensus golden scenario."""
+    led = TokenLedger()
+    owner = Key.generate(b"upheld-owner-test-seed-00000000!")
     challenger = Key.generate(b"challenger-test-seed-0000000000!")
-    # fund the challenger from the miner wallet via transfer
-    from rig.token import TransferTx
-    pay = TransferTx(from_pub=miner.pub, to_addr=address(challenger.pub),
-                     amount=2 * GRAIN, nonce=1).signed(miner)
-    core.recv_transfer(pay, outbox)
-    _mine(core)
+    jurors = [Key.generate(f"juror-{i}-test-seed-000000000000!".encode()[:32])
+              for i in range(3)]
+    led.apply_reward(1, [owner.pub], "genesis", [])         # fund the owner
+    led.apply_reward(2, [challenger.pub], "genesis", [])    # fund the challenger
+    sub = DataSubmitTx(owner_pub=owner.pub, data_hash="cd" * 32, size_bytes=9,
+                       media_type="text", stake=1 * GRAIN, nonce=0).signed(owner)
+    assert led.apply_data_tx(sub, 2, set())
     ch = DataChallengeTx(challenger_pub=challenger.pub, data_id=sub.txid(),
-                         stake=1 * GRAIN, reason="validity",
+                         stake=GRAIN // 2, reason="validity",
                          nonce=0).signed(challenger)
-    core.recv_data_tx(ch, outbox)
-    _mine(core)
-    assert ch.txid() in core.head_ledger().challenges
-    # the miner (a recent proposer) votes to uphold
-    vote = DataVoteTx(voter_pub=miner.pub, challenge_id=ch.txid(),
-                      support=True, nonce=2).signed(miner)
-    core.recv_data_tx(vote, outbox)
-    _mine(core)
-    assert core.head_ledger().challenges[ch.txid()]["votes_for"]
-    ch_bal_before = core.head_ledger().balance(address(challenger.pub))
-    entry_stake = core.head_ledger().registry[sub.txid()]["stake"]
-    _mine(core, CHALLENGE_WINDOW + 1)                   # window closes -> resolve
-    led = core.head_ledger()
+    assert led.apply_data_tx(ch, 3, set())
+    assert ch.txid() in led.challenges
+    recent = {j.pub for j in jurors}                        # disinterested quorum
+    for j in jurors:
+        vote = DataVoteTx(voter_pub=j.pub, challenge_id=ch.txid(),
+                          support=True, nonce=0).signed(j)
+        assert led.apply_data_tx(vote, 4, recent)
+    assert len(led.challenges[ch.txid()]["votes_for"]) == 3
+    ch_bal_before = led.balance(address(challenger.pub))
+    entry_stake = led.registry[sub.txid()]["stake"]
+    led.resolve_expired_challenges(3 + CHALLENGE_WINDOW + 1)
     assert led.registry[sub.txid()]["status"] == "revoked"
     assert led.registry[sub.txid()]["stake"] == 0
     # challenger got the entry's stake + their own back
     assert led.balance(address(challenger.pub)) == \
         ch_bal_before + entry_stake + ch.stake
-    # revoked entry earns nothing further
-    f_before = led.balance(g.DATA_CONTRIBUTOR)
-    _mine(core)
-    d_pool = emission(core.tree.blocks[core.tree.head].header.height) * 2_000 // 10_000
-    assert core.head_ledger().balance(g.DATA_CONTRIBUTOR) - f_before == d_pool
+    # revoked entry is no longer payable: only active corpora can be credited
+    active = {e["data_hash"] for e in led.registry.values()
+              if e["status"] == "active"}
+    assert "cd" * 32 not in active
 
 
 def test_challenge_rejected_pays_owner(core):

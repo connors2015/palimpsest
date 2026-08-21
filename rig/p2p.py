@@ -33,6 +33,13 @@ EVAL_BATCH = 96
 INCLUDE_K = 4
 LR = 0.3
 
+# rev 5 provenance: sim nodes train on the founding corpus, so every tree seeds
+# the same genesis data entry (a consensus parameter — identical on all nodes)
+# and every delta names it.
+from .token import address as _address  # noqa: E402  (import after constants)
+
+P2P_FOUNDER = _address(Key.generate(b"p2p-sim-founder-0000000000000000").pub)
+
 
 @dataclass
 class GossipNode:
@@ -57,7 +64,8 @@ class GossipNode:
         body = quantize(v - w)
         ptr = f"da://{self.key.pub[:8]}/{h}/{self.node_id}"
         tx = BackpropTx(miner=self.key.pub, base_height=h, shard_id=self.node_id,
-                        delta_hash=delta_hash(body.tobytes()), da_pointer=ptr).signed(self.key)
+                        delta_hash=delta_hash(body.tobytes()), da_pointer=ptr,
+                        data_refs=["genesis"]).signed(self.key)
         return tx, body
 
     def submit_own_tx(self, outbox):
@@ -97,7 +105,7 @@ class GossipNode:
         accepted = [c[1] for c in chosen]
         bodies = {c[1].da_pointer: c[2] for c in chosen}
         works = {c[1].txid(): c[0] for c in chosen}
-        block = build_block(self.tree, head, accepted, bodies, works, self.key.pub)
+        block = build_block(self.tree, head, accepted, bodies, works, self.key)
         if self.tree.add_block(block):
             self.seen_block.add(block.hash)
             self._prune(block)
@@ -143,7 +151,8 @@ class Network:
         self.nodes = []
         for i in range(n_nodes):
             key = Key.generate(f"node{i}".encode().ljust(32, b"0"))
-            self.nodes.append(GossipNode(i, key, BlockTree(w0.copy())))
+            self.nodes.append(GossipNode(
+                i, key, BlockTree(w0.copy(), data_contributor=P2P_FOUNDER)))
         self._wire(topology)
         self.inflight = {i: [] for i in range(n_nodes)}   # node -> [(kind, payload)]
         self.partition = None
