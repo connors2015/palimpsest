@@ -24,7 +24,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
-from .crypto import Key, verify
+from .crypto import Key, frame, verify
 
 GRAIN = 10**9                      # grains per whole token
 
@@ -70,8 +70,8 @@ class TransferTx:
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
-        return (f"transfer|{self.from_pub}|{self.to_addr}|"
-                f"{self.amount}|{self.nonce}").encode()
+        return frame(b"transfer", self.from_pub.encode(), self.to_addr.encode(),
+                     str(self.amount).encode(), str(self.nonce).encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()
@@ -101,8 +101,9 @@ class DataSubmitTx:
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
-        return (f"data_submit|{self.owner_pub}|{self.data_hash}|{self.size_bytes}|"
-                f"{self.media_type}|{self.stake}|{self.nonce}").encode()
+        return frame(b"data_submit", self.owner_pub.encode(), self.data_hash.encode(),
+                     str(self.size_bytes).encode(), self.media_type.encode(),
+                     str(self.stake).encode(), str(self.nonce).encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()
@@ -130,8 +131,8 @@ class DataChallengeTx:
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
-        return (f"data_challenge|{self.challenger_pub}|{self.data_id}|"
-                f"{self.stake}|{self.reason}|{self.nonce}").encode()
+        return frame(b"data_challenge", self.challenger_pub.encode(), self.data_id.encode(),
+                     str(self.stake).encode(), self.reason.encode(), str(self.nonce).encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()
@@ -157,8 +158,8 @@ class DataVoteTx:
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
-        return (f"data_vote|{self.voter_pub}|{self.challenge_id}|"
-                f"{int(self.support)}|{self.nonce}").encode()
+        return frame(b"data_vote", self.voter_pub.encode(), self.challenge_id.encode(),
+                     str(int(self.support)).encode(), str(self.nonce).encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()

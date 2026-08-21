@@ -224,3 +224,18 @@ fn snapshot_roundtrips_and_rejects_malformed() {
     bad.as_object_mut().unwrap().remove("challenges");
     assert!(TokenLedger::from_value(&bad).is_none(), "missing section must be rejected");
 }
+
+// --- signing-preimage framing is injective (task 96) ------------------------
+
+#[test]
+fn frame_resists_delimiter_injection() {
+    // The classic collision the old '|'-joined signing strings allowed:
+    // join(["a", "b|c"]) == "a|b|c" == join(["a|b", "c"]). Length-prefix framing
+    // must keep these distinct, so a field's contents can never be re-parsed as
+    // a different field split (which would give two txs the same txid).
+    assert_ne!(core::frame(&[b"a", b"b|c"]), core::frame(&[b"a|b", b"c"]));
+    // and empty-field boundaries are unambiguous too
+    assert_ne!(core::frame(&[b"", b"ab"]), core::frame(&[b"a", b"b"]));
+    // identical inputs still frame identically (determinism)
+    assert_eq!(core::frame(&[b"x", b"yz"]), core::frame(&[b"x", b"yz"]));
+}

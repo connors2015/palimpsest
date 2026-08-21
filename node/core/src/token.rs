@@ -93,32 +93,32 @@ pub enum AccountTx {
 
 impl TransferTx {
     pub fn signing_bytes(&self) -> Vec<u8> {
-        format!("transfer|{}|{}|{}|{}",
-                self.from_pub, self.to_addr, self.amount, self.nonce).into_bytes()
+        crate::frame(&[b"transfer", self.from_pub.as_bytes(), self.to_addr.as_bytes(),
+                       self.amount.to_string().as_bytes(), self.nonce.to_string().as_bytes()])
     }
 }
 
 impl DataSubmitTx {
     pub fn signing_bytes(&self) -> Vec<u8> {
-        format!("data_submit|{}|{}|{}|{}|{}|{}",
-                self.owner_pub, self.data_hash, self.size_bytes,
-                self.media_type, self.stake, self.nonce).into_bytes()
+        crate::frame(&[b"data_submit", self.owner_pub.as_bytes(), self.data_hash.as_bytes(),
+                       self.size_bytes.to_string().as_bytes(), self.media_type.as_bytes(),
+                       self.stake.to_string().as_bytes(), self.nonce.to_string().as_bytes()])
     }
 }
 
 impl DataChallengeTx {
     pub fn signing_bytes(&self) -> Vec<u8> {
-        format!("data_challenge|{}|{}|{}|{}|{}",
-                self.challenger_pub, self.data_id, self.stake,
-                self.reason, self.nonce).into_bytes()
+        crate::frame(&[b"data_challenge", self.challenger_pub.as_bytes(), self.data_id.as_bytes(),
+                       self.stake.to_string().as_bytes(), self.reason.as_bytes(),
+                       self.nonce.to_string().as_bytes()])
     }
 }
 
 impl DataVoteTx {
     pub fn signing_bytes(&self) -> Vec<u8> {
-        format!("data_vote|{}|{}|{}|{}",
-                self.voter_pub, self.challenge_id,
-                if self.support { 1 } else { 0 }, self.nonce).into_bytes()
+        let support = if self.support { 1u8 } else { 0u8 };
+        crate::frame(&[b"data_vote", self.voter_pub.as_bytes(), self.challenge_id.as_bytes(),
+                       support.to_string().as_bytes(), self.nonce.to_string().as_bytes()])
     }
 }
 

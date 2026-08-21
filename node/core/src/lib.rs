@@ -26,6 +26,18 @@ pub fn sha256_hex_pub(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
+/// Unambiguous signing preimage: each field length-prefixed (4-byte BE) so no
+/// field's contents can be confused with the structure. Byte-identical to the
+/// Python reference `crypto.frame` — closes the '|'-delimiter injection hazard.
+pub fn frame(parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for p in parts {
+        out.extend_from_slice(&(p.len() as u32).to_be_bytes());
+        out.extend_from_slice(p);
+    }
+    out
+}
+
 /// Float delta -> int64 fixed-point. numpy's np.round rounds half to even.
 pub fn quantize(delta: &[f64]) -> Vec<i64> {
     delta.iter().map(|x| (x * SCALE).round_ties_even() as i64).collect()
@@ -141,13 +153,16 @@ pub struct BackpropTx {
 }
 
 impl BackpropTx {
-    /// Must match the Python reference byte-for-byte.
+    /// Must match the Python reference byte-for-byte (length-prefixed framing).
     pub fn signing_bytes(&self) -> Vec<u8> {
-        format!(
-            "backprop|{}|{}|{}|{}|{}",
-            self.miner, self.base_height, self.shard_id, self.delta_hash, self.da_pointer
-        )
-        .into_bytes()
+        frame(&[
+            b"backprop",
+            self.miner.as_bytes(),
+            self.base_height.to_string().as_bytes(),
+            self.shard_id.to_string().as_bytes(),
+            self.delta_hash.as_bytes(),
+            self.da_pointer.as_bytes(),
+        ])
     }
 
     pub fn txid(&self) -> String {

@@ -9,9 +9,19 @@ signature from the key that staked it.
 
 import hashlib
 import os
+import struct
 from dataclasses import dataclass, field
 
 from . import ed25519
+
+
+def frame(*parts: bytes) -> bytes:
+    """Unambiguous signing preimage: each field is length-prefixed (4-byte
+    big-endian) so no field's contents can ever be confused with the structure.
+    This replaces '|'-joined signing strings, where a free-form field containing
+    the delimiter could make two logically different txs share a preimage / txid
+    (a canonicalization / collision hazard)."""
+    return b"".join(struct.pack(">I", len(p)) + p for p in parts)
 
 # Prefer libsodium (pynacl) — same Ed25519, ~1000x faster than the pure-Python
 # reference, which matters once a gossip network verifies thousands of sigs.
@@ -72,8 +82,9 @@ class BackpropTx:
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
-        return (f"backprop|{self.miner}|{self.base_height}|{self.shard_id}|"
-                f"{self.delta_hash}|{self.da_pointer}").encode()
+        return frame(b"backprop", self.miner.encode(), str(self.base_height).encode(),
+                     str(self.shard_id).encode(), self.delta_hash.encode(),
+                     self.da_pointer.encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()
