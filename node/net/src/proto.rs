@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-fn b64(v: &[u8]) -> String {
+pub fn b64(v: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(v)
 }
 
-fn unb64(s: &str) -> Option<Vec<u8>> {
+pub fn unb64(s: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
@@ -280,4 +280,27 @@ pub struct SyncResponse {
     pub blocks: Vec<StoredBlock>,
     pub payloads: HashMap<String, Payload>, // txid -> payload for those blocks
     pub head_height: u64,
+}
+
+/// Data-availability shard exchange (§3.3). A node missing a body asks peers for
+/// its erasure shards; each peer returns whatever shards it holds. The requester
+/// gathers K across peers and reconstructs — so a body stays recoverable even
+/// when no single node retains it whole.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ShardRequest {
+    pub txids: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ShardResponse {
+    pub bodies: Vec<BodyShards>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct BodyShards {
+    pub txid: String,
+    pub k: u32,
+    pub n: u32,
+    pub orig_len: u64,
+    pub shards: Vec<(u32, String)>, // (index, base64 shard bytes)
 }

@@ -188,6 +188,62 @@ impl Store {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// (k, n, orig_len) for a body's shard set, if we have its DA metadata.
+    pub fn shard_meta(&self, txid: &str) -> Option<(usize, usize, u64)> {
+        let m: serde_json::Value = serde_json::from_slice(
+            &fs::read(self.dir.join("da").join(txid).join("meta.json")).ok()?).ok()?;
+        Some((m["k"].as_u64()? as usize, m["n"].as_u64()? as usize, m["orig_len"].as_u64()?))
+    }
+
+    /// Every shard we currently hold for a body: (index, bytes).
+    pub fn list_shards(&self, txid: &str) -> Vec<(u32, Vec<u8>)> {
+        let mut out = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.dir.join("da").join(txid)) {
+            for e in rd.flatten() {
+                if let Ok(name) = e.file_name().into_string() {
+                    if let Some(i) = name.strip_suffix(".shard").and_then(|s| s.parse::<u32>().ok()) {
+                        if let Ok(d) = fs::read(e.path()) {
+                            out.push((i, d));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Store a shard fetched from a peer (creating DA metadata if this is the
+    /// first shard we've seen for this body).
+    pub fn put_shard(&self, txid: &str, i: u32, data: &[u8], k: usize, n: usize, orig_len: u64) {
+        let dir = self.dir.join("da").join(txid);
+        let _ = fs::create_dir_all(&dir);
+        let meta = dir.join("meta.json");
+        if !meta.exists() {
+            let _ = fs::write(&meta, serde_json::json!(
+                {"k": k, "n": n, "orig_len": orig_len, "root": ""}).to_string());
+        }
+        let _ = fs::write(dir.join(format!("{i}.shard")), data);
+    }
+
+    /// Prune a body to a shard SUBSET: drop the monolithic payload and any shard
+    /// not in `keep`. A node retains only its assigned shards of old bodies; the
+    /// rest of the network holds the others, and any node can reconstruct by
+    /// gathering K shards from peers.
+    pub fn prune_body_to_shards(&self, txid: &str, keep: &[u32]) {
+        let _ = fs::remove_file(self.dir.join("payloads").join(format!("{txid}.json")));
+        if let Ok(rd) = fs::read_dir(self.dir.join("da").join(txid)) {
+            for e in rd.flatten() {
+                if let Ok(name) = e.file_name().into_string() {
+                    if let Some(i) = name.strip_suffix(".shard").and_then(|s| s.parse::<u32>().ok()) {
+                        if !keep.contains(&i) {
+                            let _ = fs::remove_file(e.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ---- block log -------------------------------------------------------
     /// Append + fsync a block. fsync makes the record durable across power loss;
     /// the caller MUST treat an Err as fatal (a dropped write silently truncates
@@ -483,6 +539,36 @@ mod store_tests {
         let _ = fs::remove_file(dir.join("da").join(txid).join(format!("{}.shard", n - k)));
         assert!(store.get_payload(txid).is_none(), "below K shards must be unrecoverable");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconstructs_from_shards_split_across_holders() {
+        // The multi-node DA guarantee: no single holder has K shards, but their
+        // UNION does — which is exactly what the peer shard-exchange gathers.
+        let dir_a = tmpdir("da-a");
+        let a = Store::open(dir_a.to_str().unwrap()).unwrap();
+        let p = Payload { n: 9, idx: "AAECAwQFBgcI".into(), val: "CQoLDA0ODxAR".into() };
+        let txid = "splitbody";
+        a.disperse_payload(txid, &p);
+        let (k, n, orig) = a.shard_meta(txid).unwrap();
+        let all: Vec<(u32, Vec<u8>)> = a.list_shards(txid);
+        assert!(all.len() == n && k == Store::DA_K);
+
+        // holder A keeps only shards 0..(K-1) — fewer than K, can't reconstruct
+        let a_keep: Vec<u32> = (0..(k as u32 - 1)).collect();
+        a.prune_body_to_shards(txid, &a_keep);
+        assert!(a.reconstruct_payload(txid).is_none(), "< K shards alone can't reconstruct");
+
+        // holder B receives A's kept shards + one it holds itself → union >= K
+        let dir_b = tmpdir("da-b");
+        let b = Store::open(dir_b.to_str().unwrap()).unwrap();
+        for (i, data) in all.iter().take(k) {
+            b.put_shard(txid, *i, data, k, n, orig);
+        }
+        let got = b.reconstruct_payload(txid).expect("union of K shards reconstructs");
+        assert_eq!((got.n, got.idx, got.val), (p.n, p.idx.clone(), p.val.clone()));
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
     }
 
     #[test]

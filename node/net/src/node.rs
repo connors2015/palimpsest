@@ -78,42 +78,56 @@ mod mempool_bounds_tests {
     }
 }
 
-/// Length-prefixed JSON sync codec with explicit large limits — the stock JSON
-/// codec caps responses ~10MB, but an 86M-model compressed payload is ~18MB.
-#[derive(Clone, Default)]
-pub struct BigJsonCodec;
+/// Length-prefixed JSON request-response codec with configurable size caps —
+/// the stock JSON codec caps responses ~10MB, but an 86M-model compressed
+/// payload is ~18MB. Generic so the block-sync and DA-shard protocols share it.
+#[derive(Clone)]
+pub struct JsonCodec<Req, Resp> {
+    req_max: u64,
+    resp_max: u64,
+    _p: std::marker::PhantomData<fn() -> (Req, Resp)>,
+}
 
-// A sync REQUEST is two integers — cap its read tiny. A RESPONSE is bounded by
-// the serve-side byte budget (~48MB); 96MB leaves headroom for JSON/base64
-// overhead while capping the allocation a peer can force from 512MB.
-const SYNC_REQ_MAX: u64 = 64 * 1024;
+impl<Req, Resp> JsonCodec<Req, Resp> {
+    pub fn new(req_max: u64, resp_max: u64) -> Self {
+        Self { req_max, resp_max, _p: std::marker::PhantomData }
+    }
+}
+
+// A sync/shard REQUEST is small; a RESPONSE is bounded to cap the allocation a
+// peer can force (block sync ~48MB serve budget + overhead; shards similar).
+const SYNC_REQ_MAX: u64 = 256 * 1024;
 const SYNC_RESP_MAX: u64 = 96 * 1024 * 1024;
+const SHARD_REQ_MAX: u64 = 256 * 1024;
+const SHARD_RESP_MAX: u64 = 96 * 1024 * 1024;
 
 #[async_trait::async_trait]
-impl request_response::Codec for BigJsonCodec {
+impl<Req, Resp> request_response::Codec for JsonCodec<Req, Resp>
+where
+    Req: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
+    Resp: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
+{
     type Protocol = StreamProtocol;
-    type Request = SyncRequest;
-    type Response = SyncResponse;
+    type Request = Req;
+    type Response = Resp;
 
-    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T)
-        -> std::io::Result<SyncRequest>
+    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Req>
     where T: futures::AsyncRead + Unpin + Send {
         use futures::AsyncReadExt;
         let mut buf = Vec::new();
-        io.take(SYNC_REQ_MAX).read_to_end(&mut buf).await?;
+        io.take(self.req_max).read_to_end(&mut buf).await?;
         serde_json::from_slice(&buf).map_err(std::io::Error::other)
     }
 
-    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T)
-        -> std::io::Result<SyncResponse>
+    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Resp>
     where T: futures::AsyncRead + Unpin + Send {
         use futures::AsyncReadExt;
         let mut buf = Vec::new();
-        io.take(SYNC_RESP_MAX).read_to_end(&mut buf).await?;
+        io.take(self.resp_max).read_to_end(&mut buf).await?;
         serde_json::from_slice(&buf).map_err(std::io::Error::other)
     }
 
-    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: SyncRequest)
+    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: Req)
         -> std::io::Result<()>
     where T: futures::AsyncWrite + Unpin + Send {
         use futures::AsyncWriteExt;
@@ -121,7 +135,7 @@ impl request_response::Codec for BigJsonCodec {
         io.close().await
     }
 
-    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, resp: SyncResponse)
+    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, resp: Resp)
         -> std::io::Result<()>
     where T: futures::AsyncWrite + Unpin + Send {
         use futures::AsyncWriteExt;
@@ -134,7 +148,8 @@ impl request_response::Codec for BigJsonCodec {
 pub struct Behaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub identify: identify::Behaviour,
-    pub sync: request_response::Behaviour<BigJsonCodec>,
+    pub sync: request_response::Behaviour<JsonCodec<SyncRequest, SyncResponse>>,
+    pub shards: request_response::Behaviour<JsonCodec<ShardRequest, ShardResponse>>,
     pub autonat: autonat::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub relay_client: relay::client::Behaviour,
@@ -175,10 +190,16 @@ pub fn behaviour(
         identify: identify::Behaviour::new(identify::Config::new(
             "/palimpsest/1.0.0".into(), key.public())),
         sync: request_response::Behaviour::with_codec(
-            BigJsonCodec,
+            JsonCodec::new(SYNC_REQ_MAX, SYNC_RESP_MAX),
             [(StreamProtocol::new("/palimpsest/sync/1"), ProtocolSupport::Full)],
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(300)),
+        ),
+        shards: request_response::Behaviour::with_codec(
+            JsonCodec::new(SHARD_REQ_MAX, SHARD_RESP_MAX),
+            [(StreamProtocol::new("/palimpsest/shards/1"), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(120)),
         ),
         autonat: autonat::Behaviour::new(peer_id, autonat::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
@@ -473,6 +494,29 @@ impl Node {
             return false;
         }
         let Some(block) = sb.to_core(&self.payloads) else {
+            // body missing: try to reconstruct it from erasure shards we already
+            // hold, and if we can't, ask ALL peers for its shards (any one may
+            // hold a few) in parallel with the full-block sync fallback.
+            let missing: Vec<String> = sb.txs.iter()
+                .filter_map(|t| t.to_core().map(|tc| tc.txid()))
+                .filter(|id| {
+                    if self.payloads.contains_key(id) {
+                        return false;
+                    }
+                    if let Some(p) = self.store.reconstruct_payload(id) {
+                        self.payloads.insert(id.clone(), p); // recovered locally
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+            if !missing.is_empty() {
+                let peers: Vec<PeerId> = swarm.connected_peers().copied().collect();
+                for p in &peers {
+                    swarm.behaviour_mut().shards
+                        .send_request(p, ShardRequest { txids: missing.clone() });
+                }
+            }
             if let Some(peer) = from {
                 let req = SyncRequest {
                     from_height: sb.header.height.saturating_sub(1),
@@ -585,6 +629,46 @@ impl Node {
             .map(|(k, _)| k.clone()).collect();
         for k in drop_pending {
             self.pending.remove(&k);
+        }
+        self.prune_old_bodies(h);
+    }
+
+    /// The DA shard indices THIS node retains for old bodies — a deterministic,
+    /// per-node window of K+2 shards (any node self-reconstructs, and a few
+    /// nodes' windows cover all N so a peer with none can gather K from others).
+    fn my_shard_zone(&self) -> Vec<u32> {
+        let hh = core::delta_hash(self.key.pub_hex().as_bytes());
+        let off = usize::from_str_radix(&hh[..8], 16).unwrap_or(0) % Store::DA_N;
+        (0..(Store::DA_K + 2)).map(|j| ((off + j) % Store::DA_N) as u32).collect()
+    }
+
+    /// Once a block leaves the body-retention window, drop its MONOLITHIC bodies
+    /// and keep only this node's shard zone — roughly halving old-body storage
+    /// while every body stays reconstructable (locally from K+2 shards, or from
+    /// peers via the shard exchange). Prunes exactly the block at the frontier.
+    fn prune_old_bodies(&mut self, head_h: u64) {
+        const BODY_WINDOW: u64 = 16;
+        let frontier = match head_h.checked_sub(BODY_WINDOW + 1) {
+            Some(f) if f > 0 => f,
+            _ => return,
+        };
+        let mut cur = self.tree.head.clone();
+        let keep = self.my_shard_zone();
+        while let Some(hdr) = self.tree.blocks.get(&cur) {
+            if hdr.height < frontier {
+                break;
+            }
+            if hdr.height == frontier {
+                if let Some(sb) = self.blocks_full.get(&cur).cloned() {
+                    for t in &sb.txs {
+                        if let Some(tc) = t.to_core() {
+                            self.store.prune_body_to_shards(&tc.txid(), &keep);
+                        }
+                    }
+                }
+                break;
+            }
+            cur = hdr.prev_hash.clone();
         }
     }
 
@@ -1068,6 +1152,49 @@ pub async fn run(
                             // peer immediately pulls the next batch (continuous
                             // catch-up instead of one batch per throttle window)
                             node.last_sync_req.remove(&peer);
+                        }
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Shards(
+                        request_response::Event::Message { message, .. })) => {
+                    match message {
+                        // serve whatever shards we hold for the requested bodies
+                        request_response::Message::Request { request, channel, .. } => {
+                            let mut bodies = Vec::new();
+                            for txid in request.txids.iter().take(128) {
+                                if let Some((k, n, orig_len)) = node.store.shard_meta(txid) {
+                                    let shards: Vec<(u32, String)> = node.store.list_shards(txid)
+                                        .into_iter().map(|(i, d)| (i, b64(&d))).collect();
+                                    if !shards.is_empty() {
+                                        bodies.push(BodyShards {
+                                            txid: txid.clone(), k: k as u32, n: n as u32,
+                                            orig_len, shards });
+                                    }
+                                }
+                            }
+                            let _ = swarm.behaviour_mut().shards
+                                .send_response(channel, ShardResponse { bodies });
+                        }
+                        // store fetched shards; reconstruct any body now >= K
+                        request_response::Message::Response { response, .. } => {
+                            let mut got = false;
+                            for b in response.bodies {
+                                for (i, data) in b.shards {
+                                    if let Some(bytes) = unb64(&data) {
+                                        node.store.put_shard(&b.txid, i, &bytes,
+                                            b.k as usize, b.n as usize, b.orig_len);
+                                        got = true;
+                                    }
+                                }
+                                if !node.payloads.contains_key(&b.txid) {
+                                    if let Some(p) = node.store.reconstruct_payload(&b.txid) {
+                                        node.payloads.insert(b.txid.clone(), p);
+                                    }
+                                }
+                            }
+                            if got {
+                                node.retry_pending(&mut swarm);
+                            }
                         }
                     }
                 }
