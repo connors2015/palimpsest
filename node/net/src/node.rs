@@ -451,8 +451,17 @@ impl Node {
     fn build_candidate(&self) -> Option<(StoredBlock, palimpsest_core::blocktree::Block)> {
         let head = self.tree.head.clone();
         let hh = self.head_height();
+        // rev 5: a delta that names no staked/active corpus would invalidate the
+        // whole block (provenance required) — never build on one.
+        let active_hashes: std::collections::BTreeSet<String> =
+            self.tree.ledger[&head].registry.values()
+                .filter(|e| e["status"] == "active")
+                .filter_map(|e| e["data_hash"].as_str().map(|s| s.to_string()))
+                .collect();
         let mut cands: Vec<&core::BackpropTx> = self.delta_pool.values()
-            .filter(|t| t.base_height == hh).collect();
+            .filter(|t| t.base_height == hh)
+            .filter(|t| t.canonical_refs().iter().any(|r| active_hashes.contains(r)))
+            .collect();
         if cands.is_empty() {
             return None;
         }
@@ -477,11 +486,39 @@ impl Node {
         let mean = chunked_aggregate(&payload_refs, parent_w.len(), AGG_CHUNK);
         // wrapping_add mirrors numpy int64 (matches validate_block exactly)
         let w: Vec<i64> = parent_w.iter().zip(&mean).map(|(a, b)| a.wrapping_add(*b)).collect();
-        // account lanes: dry-run in the validator's exact order
+        // account lanes: dry-run in the validator's exact order (blocktree::apply)
         let mut scratch = self.tree.ledger[&head].clone();
         scratch.resolve_expired_challenges(hh + 1);
+        scratch.resolve_expired_bonds(hh + 1);
         let miner_pubs: Vec<String> = chosen.iter().map(|t| t.miner.clone()).collect();
-        scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &[], &Default::default());
+        // rev 5/6: the validator derives data_credits from the deltas' named
+        // corpora and drains the fee pools — the producer must mirror it EXACTLY
+        // or its own ledger_root never reproduces and every block it builds is
+        // rejected (including by itself).
+        let data_addrs: Vec<String> = self.tree.data_contributor.clone()
+            .map(|d| vec![d]).unwrap_or_default();
+        let hash_weight: std::collections::BTreeMap<String, u64> = scratch.registry.values()
+            .filter(|e| e["status"] == "active" && e["weight"].as_u64().unwrap_or(0) > 0)
+            .filter_map(|e| Some((e["data_hash"].as_str()?.to_string(), e["weight"].as_u64()?)))
+            .collect();
+        let mut data_credits: std::collections::BTreeMap<String, u64> = Default::default();
+        for t in &chosen {
+            for r in t.canonical_refs() {
+                if let Some(w) = hash_weight.get(&r) {
+                    *data_credits.entry(r).or_insert(0) += *w;
+                }
+            }
+        }
+        scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &data_addrs, &data_credits);
+        for t in &chosen {
+            // bonds are 0 during bootstrap; a delta whose miner cannot afford its
+            // bond would make the block invalid, so it must not be built on.
+            if !scratch.lock_bond(&t.txid(), &core::token::address(&t.miner), t.bond, hh + 1) {
+                warn!("candidate delta {} bond unaffordable; block would be invalid",
+                      &t.txid()[..8]);
+                return None;
+            }
+        }
         let jurors = self.tree.recent_proposers(&head);
         let mut transfers = Vec::new();
         let mut data_txs = Vec::new();
