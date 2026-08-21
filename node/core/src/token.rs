@@ -83,6 +83,17 @@ pub struct DataVoteTx {
     pub sig: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct InferenceReceiptTx {
+    pub payer_pub: String,
+    pub server_addr: String,
+    pub fee: u64,
+    pub output_hash: String,
+    pub head_root: String,
+    pub nonce: u64,
+    pub sig: Vec<u8>,
+}
+
 /// The merged account-tx lane: one nonce sequence per wallet totally orders
 /// everything it does.
 #[derive(Clone, Debug)]
@@ -91,6 +102,15 @@ pub enum AccountTx {
     DataSubmit(DataSubmitTx),
     DataChallenge(DataChallengeTx),
     DataVote(DataVoteTx),
+    InferenceReceipt(InferenceReceiptTx),
+}
+
+impl InferenceReceiptTx {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        crate::frame(&[b"inference", self.payer_pub.as_bytes(), self.server_addr.as_bytes(),
+                       self.fee.to_string().as_bytes(), self.output_hash.as_bytes(),
+                       self.head_root.as_bytes(), self.nonce.to_string().as_bytes()])
+    }
 }
 
 impl TransferTx {
@@ -131,6 +151,7 @@ impl AccountTx {
             AccountTx::DataSubmit(t) => t.signing_bytes(),
             AccountTx::DataChallenge(t) => t.signing_bytes(),
             AccountTx::DataVote(t) => t.signing_bytes(),
+            AccountTx::InferenceReceipt(t) => t.signing_bytes(),
         }
     }
 
@@ -144,6 +165,7 @@ impl AccountTx {
             AccountTx::DataSubmit(t) => &t.owner_pub,
             AccountTx::DataChallenge(t) => &t.challenger_pub,
             AccountTx::DataVote(t) => &t.voter_pub,
+            AccountTx::InferenceReceipt(t) => &t.payer_pub,
         }
     }
 
@@ -153,6 +175,7 @@ impl AccountTx {
             AccountTx::DataSubmit(t) => t.nonce,
             AccountTx::DataChallenge(t) => t.nonce,
             AccountTx::DataVote(t) => t.nonce,
+            AccountTx::InferenceReceipt(t) => t.nonce,
         }
     }
 
@@ -162,6 +185,7 @@ impl AccountTx {
             AccountTx::DataSubmit(t) => &t.sig,
             AccountTx::DataChallenge(t) => &t.sig,
             AccountTx::DataVote(t) => &t.sig,
+            AccountTx::InferenceReceipt(t) => &t.sig,
         }
     }
 
@@ -426,6 +450,16 @@ impl TokenLedger {
                 let arr = ch[k].as_array_mut().unwrap();
                 arr.push(json!(src));
                 arr.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+            }
+            AccountTx::InferenceReceipt(t) => {
+                // a signed usage fee: payer pays the serving node for an attested
+                // inference (the on-chain payment + receipt; attestation is
+                // off-chain, disputed via the challenge market).
+                if t.fee == 0 || self.balance(&src) < t.fee {
+                    return false;
+                }
+                *self.balances.get_mut(&src).unwrap() -= t.fee;
+                self.credit(&t.server_addr, t.fee);
             }
             AccountTx::Transfer(_) => return false,
         }

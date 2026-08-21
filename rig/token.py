@@ -175,6 +175,39 @@ class DataVoteTx:
         return verify(self.voter_pub, self.signing_bytes(), self.sig)
 
 
+@dataclass
+class InferenceReceiptTx:
+    """A verified fee-bearing inference (§4.2/§8, forward-prop). The PAYER signs
+    a fee to the serving node, committing to the attested output and the head
+    state root it was served against — the on-chain payment + receipt. The
+    server's attestation over the output is off-chain; a bad attestation is
+    disputed via the challenge market. This is the revenue lane: usage fees, not
+    inflation, fund the network."""
+    payer_pub: str
+    server_addr: str               # who is paid
+    fee: int                       # grains
+    output_hash: str               # sha256 of the served output bytes
+    head_root: str                 # the weights-state root it was served against
+    nonce: int
+    sig: bytes = b""
+
+    def signing_bytes(self) -> bytes:
+        return frame(b"inference", self.payer_pub.encode(), self.server_addr.encode(),
+                     str(self.fee).encode(), self.output_hash.encode(),
+                     self.head_root.encode(), str(self.nonce).encode())
+
+    def txid(self) -> str:
+        return hashlib.sha256(self.signing_bytes()).hexdigest()
+
+    def signed(self, key: Key) -> "InferenceReceiptTx":
+        assert key.pub == self.payer_pub
+        self.sig = key.sign(self.signing_bytes())
+        return self
+
+    def verify(self) -> bool:
+        return verify(self.payer_pub, self.signing_bytes(), self.sig)
+
+
 class TokenLedger:
     """Balances + nonces + the data registry + open challenges — the full token
     state. Every mutation is deterministic integer math."""
@@ -313,6 +346,7 @@ class TokenLedger:
             return False
         src = address(tx.owner_pub if isinstance(tx, DataSubmitTx)
                       else tx.challenger_pub if isinstance(tx, DataChallengeTx)
+                      else tx.payer_pub if isinstance(tx, InferenceReceiptTx)
                       else tx.voter_pub)
         if tx.nonce != self.nonces.get(src, 0):
             return False
@@ -352,6 +386,15 @@ class TokenLedger:
                 return False
             (ch["votes_for"] if tx.support else ch["votes_against"]).append(src)
             ch["votes_for"].sort(); ch["votes_against"].sort()   # canonical
+        elif isinstance(tx, InferenceReceiptTx):
+            # a signed usage fee: the payer pays the serving node for an attested
+            # inference. Payment is authorized by the payer's signature; the
+            # committed output_hash/head_root are the on-chain receipt. Bad
+            # attestations are disputed off-chain via the challenge market.
+            if tx.fee <= 0 or self.balances.get(src, 0) < tx.fee:
+                return False
+            self.balances[src] -= tx.fee
+            self._credit(tx.server_addr, tx.fee)
         else:
             return False
         self.nonces[src] = tx.nonce + 1
@@ -404,6 +447,8 @@ def _tx_sender(tx) -> str:
         return address(tx.owner_pub)
     if isinstance(tx, DataChallengeTx):
         return address(tx.challenger_pub)
+    if isinstance(tx, InferenceReceiptTx):
+        return address(tx.payer_pub)
     return address(tx.voter_pub)
 
 

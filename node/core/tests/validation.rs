@@ -132,6 +132,7 @@ fn signed(mut tx: AccountTx, key: &core::Key) -> AccountTx {
         AccountTx::DataSubmit(t) => t.sig = sig,
         AccountTx::DataChallenge(t) => t.sig = sig,
         AccountTx::DataVote(t) => t.sig = sig,
+        AccountTx::InferenceReceipt(t) => t.sig = sig,
     }
     tx
 }

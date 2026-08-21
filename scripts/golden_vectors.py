@@ -236,6 +236,25 @@ def main():
         "root_returned": root_returned, "bal_returned": bal_returned,
     }]
 
+    # --- fee-bearing inference receipt: a usage fee payer -> serving node -----
+    from rig.token import InferenceReceiptTx
+    ledr = TokenLedger()
+    ledr.apply_reward(1, [key.pub], key.pub, [])          # fund the payer
+    payer_addr, server = address(key.pub), address(k2.pub)
+    fee = ledr.balance(payer_addr) // 10
+    rcpt = InferenceReceiptTx(payer_pub=key.pub, server_addr=server, fee=fee,
+                              output_hash="aa" * 32, head_root="bb" * 32,
+                              nonce=0).signed(key)
+    assert ledr.apply_data_tx(rcpt, 5, set())
+    v["inference"] = [{
+        "payer_pub": key.pub, "server_addr": server, "fee": fee,
+        "output_hash": "aa" * 32, "head_root": "bb" * 32, "nonce": 0,
+        "signing_bytes_hex": rcpt.signing_bytes().hex(), "txid": rcpt.txid(),
+        "sig_hex": rcpt.sig.hex(),
+        "payer_after": ledr.balance(payer_addr), "server_after": ledr.balance(server),
+        "root_after": ledr.root(),
+    }]
+
     # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----
     from rig import da as _da
     da_body = bytes((i * 7 + 3) % 256 for i in range(100))

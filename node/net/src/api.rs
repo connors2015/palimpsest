@@ -150,6 +150,11 @@ async fn data_vote(State(api): State<Api>, Json(b): Json<Value>) -> Json<Value> 
     ask(&api.tx, |o| ApiCmd::SubmitAccountTx(tag("data_vote", b), o)).await
 }
 
+/// Submit a signed fee-bearing inference receipt (payer -> serving node).
+async fn inference(State(api): State<Api>, Json(b): Json<Value>) -> Json<Value> {
+    ask(&api.tx, |o| ApiCmd::SubmitAccountTx(tag("inference", b), o)).await
+}
+
 pub async fn run(bind: String, port: u16, admin_token: Option<String>,
                  tx: mpsc::Sender<ApiCmd>) {
     let guarded = admin_token.is_some();
@@ -167,6 +172,7 @@ pub async fn run(bind: String, port: u16, admin_token: Option<String>,
         .route("/data/submit", post(data_submit))
         .route("/data/challenge", post(data_challenge))
         .route("/data/vote", post(data_vote))
+        .route("/inference", post(inference))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(Api { tx, admin_token });
     // retry the bind: fast restarts leave the old socket lingering briefly, and

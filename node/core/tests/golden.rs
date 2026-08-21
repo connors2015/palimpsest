@@ -418,3 +418,31 @@ fn bond_lifecycle_matches_reference() {
                 "a bond the miner can't afford is rejected");
     }
 }
+
+#[test]
+fn inference_receipt_matches_reference() {
+    use palimpsest_core::token::{address, AccountTx, InferenceReceiptTx, TokenLedger};
+    use std::collections::HashSet;
+    for case in vectors()["inference"].as_array().unwrap() {
+        let payer = case["payer_pub"].as_str().unwrap();
+        let rcpt = AccountTx::InferenceReceipt(InferenceReceiptTx {
+            payer_pub: payer.into(),
+            server_addr: case["server_addr"].as_str().unwrap().into(),
+            fee: case["fee"].as_u64().unwrap(),
+            output_hash: case["output_hash"].as_str().unwrap().into(),
+            head_root: case["head_root"].as_str().unwrap().into(),
+            nonce: case["nonce"].as_u64().unwrap(),
+            sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
+        });
+        assert_eq!(hex::encode(rcpt.signing_bytes()),
+                   case["signing_bytes_hex"].as_str().unwrap());
+        assert_eq!(rcpt.txid(), case["txid"].as_str().unwrap());
+        let mut led = TokenLedger::new();
+        led.apply_reward(1, &[payer.to_string()], payer, &[]);
+        assert!(led.apply_data_tx(&rcpt, 5, &HashSet::new()), "receipt must apply");
+        assert_eq!(led.balance(&address(payer)), case["payer_after"].as_u64().unwrap());
+        assert_eq!(led.balance(case["server_addr"].as_str().unwrap()),
+                   case["server_after"].as_u64().unwrap());
+        assert_eq!(led.root(), case["root_after"].as_str().unwrap());
+    }
+}

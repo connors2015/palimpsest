@@ -7,7 +7,7 @@ use base64::Engine;
 use palimpsest_core::{
     self as core,
     blocktree::Block,
-    token::{AccountTx, DataChallengeTx, DataSubmitTx, DataVoteTx, TransferTx},
+    token::{AccountTx, DataChallengeTx, DataSubmitTx, DataVoteTx, InferenceReceiptTx, TransferTx},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -176,6 +176,10 @@ pub fn account_tx_to_json(t: &AccountTx) -> Value {
         AccountTx::DataVote(x) => json!({"kind": "data_vote", "voter_pub": x.voter_pub,
             "challenge_id": x.challenge_id, "support": x.support, "nonce": x.nonce,
             "sig": hex::encode(&x.sig)}),
+        AccountTx::InferenceReceipt(x) => json!({"kind": "inference",
+            "payer_pub": x.payer_pub, "server_addr": x.server_addr, "fee": x.fee,
+            "output_hash": x.output_hash, "head_root": x.head_root, "nonce": x.nonce,
+            "sig": hex::encode(&x.sig)}),
     }
 }
 
@@ -207,6 +211,14 @@ pub fn account_tx_from_json(v: &Value) -> Option<AccountTx> {
             voter_pub: v["voter_pub"].as_str()?.into(),
             challenge_id: v["challenge_id"].as_str()?.into(),
             support: v["support"].as_bool()?,
+            nonce: v["nonce"].as_u64()?, sig,
+        }),
+        "inference" => AccountTx::InferenceReceipt(InferenceReceiptTx {
+            payer_pub: v["payer_pub"].as_str()?.into(),
+            server_addr: v["server_addr"].as_str()?.into(),
+            fee: v["fee"].as_u64()?,
+            output_hash: v["output_hash"].as_str()?.into(),
+            head_root: v["head_root"].as_str()?.into(),
             nonce: v["nonce"].as_u64()?, sig,
         }),
         _ => return None,
