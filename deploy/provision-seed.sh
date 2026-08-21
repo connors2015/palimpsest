@@ -94,7 +94,7 @@ Wants=network-online.target
 [Service]
 ExecStart=$APP/node/target/release/palimpsest-node \\
   --data-dir $APP/data \\
-  --key-seed $(cat $APP/seed.key) \\
+  --key-file $APP/seed.key \\
   --genesis-file $APP/genesis.bin \\
   --port $NODE_PORT --api-port $API_PORT --bridge-port 7999 \\
   --relay-server \\

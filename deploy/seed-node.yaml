@@ -56,13 +56,20 @@ spec:
               ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
               git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
               cd /app/node && cargo build --release
+              # identity comes from a k8s Secret via env (never argv / never in
+              # this manifest). Create it once with:
+              #   kubectl create secret generic palimpsest-seed-key \
+              #     --from-literal=key-seed=$(head -c32 /dev/urandom | xxd -p -c64)
               exec target/release/palimpsest-node \
                 --data-dir /data \
-                --key-seed 5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed \
                 --genesis-file /shared/genesis.bin \
                 --port 9800 --api-port 8080 --bridge-port 7999 \
                 --relay-server \
                 --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
+          env:
+            - name: PALIMPSEST_KEY_SEED
+              valueFrom:
+                secretKeyRef: {name: palimpsest-seed-key, key: key-seed}
           ports:
             - {containerPort: 9800, protocol: UDP, name: gossip-udp}
             - {containerPort: 9800, protocol: TCP, name: gossip-tcp}

@@ -37,7 +37,9 @@ struct Args {
     #[arg(long, default_value = "")]
     wallet: String,          // wallet.json (identity); or:
     #[arg(long, default_value = "")]
-    key_seed: String,        // raw 32-byte hex seed (devnet / infra nodes)
+    key_seed: String,        // DEPRECATED: raw hex seed on argv (ps-visible!)
+    #[arg(long, default_value = "")]
+    key_file: String,        // path to a 0600 file holding a 32-byte hex seed
     #[arg(long, default_value = "")]
     genesis_file: String,    // raw i64-LE genesis vector (ceremony artifact)
     #[arg(long, default_value_t = 0)]
@@ -90,10 +92,37 @@ fn decrypt_wallet(enc: &serde_json::Value, passphrase: &str) -> Option<[u8; 32]>
     sk.try_into().ok()
 }
 
+/// Decode a 32-byte hex seed, wiping the hex text + decoded Vec afterwards so
+/// transient key material doesn't linger in freed memory.
+fn seed_from_hex(mut hexed: String) -> [u8; 32] {
+    use zeroize::Zeroize;
+    let mut raw = hex::decode(hexed.trim()).expect("key seed must be hex");
+    hexed.zeroize();
+    let out: [u8; 32] = raw.as_slice().try_into().expect("key seed must be 32 bytes");
+    raw.zeroize();
+    out
+}
+
+/// Load the node identity WITHOUT ever taking key material from argv (which is
+/// world-readable via ps/proc). Preferred sources, in order: a key file (0600),
+/// the PALIMPSEST_KEY_SEED env var, an (encrypted) wallet. --key-seed remains
+/// only as a loud-deprecated fallback for local devnet.
 fn load_identity(args: &Args) -> [u8; 32] {
+    if !args.key_file.is_empty() {
+        let hexed = std::fs::read_to_string(&args.key_file)
+            .expect("--key-file unreadable");
+        return seed_from_hex(hexed);
+    }
+    if let Ok(hexed) = std::env::var("PALIMPSEST_KEY_SEED") {
+        if !hexed.is_empty() {
+            std::env::remove_var("PALIMPSEST_KEY_SEED"); // don't leak to children
+            return seed_from_hex(hexed);
+        }
+    }
     if !args.key_seed.is_empty() {
-        let raw = hex::decode(&args.key_seed).expect("--key-seed must be hex");
-        return raw.try_into().expect("--key-seed must be 32 bytes");
+        warn!("--key-seed passes the private key on the command line, visible in \
+               ps/proc to any local user; use --key-file or PALIMPSEST_KEY_SEED");
+        return seed_from_hex(args.key_seed.clone());
     }
     if !args.wallet.is_empty() {
         let raw = std::fs::read_to_string(&args.wallet).expect("wallet file unreadable");
@@ -109,7 +138,7 @@ fn load_identity(args: &Args) -> [u8; 32] {
         }
         panic!("wallet file has neither sk nor enc");
     }
-    panic!("identity required: --wallet or --key-seed");
+    panic!("identity required: --key-file, PALIMPSEST_KEY_SEED, or --wallet");
 }
 
 fn load_genesis(args: &Args, store: &store::Store) -> Vec<i64> {
@@ -223,6 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bridge_tx: bridge_cmd_tx,
         bridge_synced: false,
         train_inflight: false,
+        train_deadline: 0.0,
         t0: if args.t0 > 0.0 { args.t0 } else {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()

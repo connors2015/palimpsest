@@ -162,8 +162,16 @@ pub fn behaviour(
 }
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+    // guarded: a clock set before 1970 would make duration_since Err and the old
+    // `.unwrap()` panic the whole node. Treat a pre-epoch clock as t=0.
+    SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
+
+/// If a training round is dispatched to the bridge but no Delta/resync comes
+/// back within this long, the trainer is assumed hung; clear the in-flight flag
+/// so the node resumes contributing instead of going silent forever.
+const TRAIN_TIMEOUT_SECS: f64 = 180.0;
 
 pub struct NodeConfig {
     pub produce: bool,
@@ -191,6 +199,8 @@ pub struct Node {
     pub bridge_tx: mpsc::Sender<ToBridge>,
     pub bridge_synced: bool,
     pub train_inflight: bool,
+    /// wall-clock deadline for the in-flight training round (watchdog)
+    pub train_deadline: f64,
     pub t0: f64,
     pub last_proposed_round: i64,
     pub last_announced_round: i64,
@@ -689,6 +699,11 @@ pub async fn run(
     let end = if node.cfg.seconds > 0.0 { now() + node.cfg.seconds } else { f64::MAX };
     let mut tick = tokio::time::interval(Duration::from_millis(400));
     let jitter: f64 = rand::random::<f64>() * 0.5;
+    // SIGTERM is what systemd/k8s send on stop — handle it (not just SIGINT) so
+    // the post-loop final snapshot runs and the next boot fast-boots at head.
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
 
     loop {
         if now() >= end {
@@ -696,7 +711,11 @@ pub async fn run(
         }
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("shutdown signal");
+                info!("SIGINT — shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM — shutting down");
                 break;
             }
             _ = tick.tick() => {
@@ -735,6 +754,7 @@ pub async fn run(
                     // proposing itself may rotate (devnet) or be open (mainnet)
                     if node.bridge_synced && !node.train_inflight {
                         node.train_inflight = true;
+                        node.train_deadline = now() + TRAIN_TIMEOUT_SECS;
                         let _ = node.bridge_tx.try_send(ToBridge::Train {
                             height: node.head_height(),
                             seed: round as u64,
@@ -775,6 +795,12 @@ pub async fn run(
                             }
                         }
                     }
+                }
+                // WATCHDOG: a hung trainer must not silence the node forever
+                if node.train_inflight && now() > node.train_deadline {
+                    warn!("training round timed out after {TRAIN_TIMEOUT_SECS}s — \
+                           clearing in-flight flag and resuming");
+                    node.train_inflight = false;
                 }
             }
             Some(ev) = bridge_rx.recv() => match ev {
