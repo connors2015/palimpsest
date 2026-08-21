@@ -47,11 +47,25 @@ each phase.
   - 📐 threshold-BLS beacon for unbiasability (`rig/beacon.py`)
 - 🧪 Capacity retarget controller (`core::capacity`) (117)
   - ☐ enforce the work quota in validate_block
-- 📐 Delta scoring: held-out-shard loss, commit-reveal committee, audit (108)
+- ✅ Delta scoring (rev 7) — held-out-shard loss scores COMMITTED per block
+  (header.score_root), enforced structure/bounds/commitment in validation;
+  miner pool + data credits split ∝ score, uniform fallback; the trainer bridge
+  evaluates candidates on a seeded held-out batch (108). Scores are bonded,
+  challengeable proposer claims — the commit-reveal COMMITTEE (multi-evaluator
+  score verification + slashing automation) remains the testnet upgrade.
+- ✅ Provenance (rev 5) — deltas must name staked, active corpora (data_refs in
+  the signing preimage); the data share pays the named owners (139/140).
+  "availability" is a documented challenge reason: vanished bytes → slash +
+  revoke → unnamable. Deep byte-audit sampling is the testnet extension.
+- ✅ Economics (rev 6) — tail emission (never zero), 1M-block epochs, 60/20/20
+  inference fee split with on-chain fee pools drained to named data owners +
+  miners (see economics-lifecycle.md).
 - ✅ Delta stake bond (admission cost) — lock/return done + golden-tested (109);
   slashing on proven fraud couples to scoring (testnet)
 - ✅ Byzantine-robust aggregation at low miner counts (110) — trim ≥1 at k≥3
-- 📐 Dtx cross-inclusion (anti-censorship) (114)
+- 🧪 Dtx cross-inclusion (anti-censorship) (114) — per-proposer omission
+  monitoring live in /metrics + /miners; the consensus-level inclusion
+  challenge is testnet-phase (a validator can only expect deltas it saw)
 - ✅ Fee-bearing inference receipts (116) — on-chain fee payer→server + receipt
   done + golden-tested; off-chain output attestation is the challenge-market
   extension (testnet)
@@ -78,12 +92,17 @@ token-gated/disabled.
 - ☐ Python reference suite pinned + green in CI (127)
 - ✅ Threat model (132) · this readiness doc (133)
 
-## Remaining — just 2, both Phase-2/3 by nature (need live compute / a network)
-The readiness gate for each is the testnet, not a golden vector.
-- 108 delta scoring (held-out-shard loss) — needs off-chain model execution; a
-  self-reported score without the commit-reveal committee would be gameable, so
-  it genuinely gates on the testnet's off-chain verification
-- ✅ 109 delta stake bond DONE (see above); slashing gates on 108 (testnet)
+## Remaining — testnet-phase extensions (need a multi-party network)
+The single-operator devnet can't validate these; the testnet is their gate.
+- 108 committee upgrade: multi-evaluator commit-reveal score verification +
+  automated slashing (the committed-scores mechanism itself is ✅ live; what
+  remains is removing trust in the lone proposer's evaluation)
+- 114 consensus-level cross-inclusion challenge (omission MONITORING is ✅ live)
+- 141 sketch-based usage attribution for the fee data pool (§8) — the pool +
+  pro-rata drain are ✅ live; the sketch commitment/verification pipeline rides
+  on the same off-chain-eval infrastructure as the 108 committee
+- ✅ 109 delta stake bond DONE (see above); slashing automation gates on the
+  108 committee (testnet)
 - ✅ 111/112 DA routing DONE at the storage layer: bodies are erasure-coded into
   Merkle-committed shards on write, and replay/sync reconstruct from any K shards
   instead of hard-stopping on a missing body (tested: recover from K, fail below
