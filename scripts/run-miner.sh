@@ -30,9 +30,14 @@ setsid nohup "$BIN" \
   --produce --interval 60 --peers "$PEERS" \
   --data-contributor "$FOUNDER" \
   > /tmp/palimpsest-node.log 2>&1 < /dev/null &
-sleep 4
+# validated chain replay at boot takes ~5s/block at 86M scale — poll patiently
+for i in $(seq 1 120); do
+    curl -s -m 2 "http://127.0.0.1:$API/status" > /dev/null && break
+    pgrep -f "$BIN" > /dev/null || { echo "NODE DIED:"; tail -5 /tmp/palimpsest-node.log; exit 1; }
+    sleep 3
+done
 if ! curl -s -m 3 "http://127.0.0.1:$API/status" > /dev/null; then
-    echo "NODE FAILED:"; tail -5 /tmp/palimpsest-node.log; exit 1
+    echo "NODE NOT READY after 6min:"; tail -5 /tmp/palimpsest-node.log; exit 1
 fi
 
 setsid nohup "$PY" -m client.miner_bridge \
