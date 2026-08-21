@@ -296,6 +296,10 @@ pub struct Node {
     /// score is 0 and the uniform fallback covers an entirely unscored block.
     /// Evicted in lockstep with delta_pool.
     pub delta_scores: HashMap<String, u64>,
+    /// rev 8: influence sketches from OUR trainer for pool deltas (txid ->
+    /// [i32; SKETCH_DIM]), arriving with the eval scores; missing = zeros
+    /// (unsketched). Evicted in lockstep with delta_pool.
+    pub delta_sketches: HashMap<String, Vec<i32>>,
     /// #114 (observable half): per-proposer count of pool deltas we had
     /// gossiped BEFORE a proposer's block arrived that the block then omitted.
     /// Censorship-suspicion observability, NOT a consensus rule.
@@ -353,6 +357,7 @@ impl Node {
     fn drop_pool_delta(&mut self, txid: &str) {
         self.delta_pool.remove(txid);
         self.delta_scores.remove(txid);
+        self.delta_sketches.remove(txid);
         self.payloads.remove(txid);
         self.store.remove_payload(txid);
     }
@@ -558,15 +563,55 @@ impl Node {
             .filter(|e| e["status"] == "active" && e["weight"].as_u64().unwrap_or(0) > 0)
             .filter_map(|e| e["data_hash"].as_str().map(String::from))
             .collect();
+        // rev 8: commit our trainer's influence sketches (missing -> zeros) and
+        // run the validator's registry accrual on the scratch ledger — the
+        // ledger_root must reproduce EXACTLY (producer/validator asymmetry is
+        // the self-rejecting-blocks bug class).
+        let blk_sketches: std::collections::BTreeMap<String, Vec<i32>> = chosen.iter()
+            .map(|t| {
+                let id = t.txid();
+                let mut sk = self.delta_sketches.get(&id).cloned()
+                    .unwrap_or_else(|| vec![0; core::blocktree::SKETCH_DIM]);
+                sk.resize(core::blocktree::SKETCH_DIM, 0);
+                (id, sk)
+            })
+            .collect();
+        let hash_to_key: std::collections::BTreeMap<String, String> = scratch.registry.iter()
+            .filter(|(_, e)| e["status"] == "active")
+            .filter_map(|(k, e)| Some((e["data_hash"].as_str()?.to_string(), k.clone())))
+            .collect();
         let mut miner_weights: std::collections::BTreeMap<String, u64> = Default::default();
         let mut data_credits: std::collections::BTreeMap<String, u64> = Default::default();
         for t in &chosen {
-            let s = eff[&t.txid()];
+            let txid = t.txid();
+            let s = eff[&txid];
             *miner_weights.entry(t.miner.clone()).or_insert(0) += s;
             let named: Vec<String> = t.canonical_refs().into_iter()
                 .filter(|r| active_set.contains(r)).collect();
             for r in &named {
                 *data_credits.entry(r.clone()).or_insert(0) += s * 10_000 / named.len() as u64;
+            }
+            let sk = &blk_sketches[&txid];
+            if sk.iter().any(|x| *x != 0) {
+                let named_keys: Vec<&String> = t.canonical_refs().iter()
+                    .filter_map(|r| hash_to_key.get(r)).collect::<Vec<_>>();
+                let n = named_keys.len() as i128;
+                if n > 0 {
+                    for key in named_keys {
+                        let e = scratch.registry.get_mut(key).unwrap();
+                        let acc: Vec<i64> = match e.get("sketch").and_then(|v| v.as_array()) {
+                            Some(a) if !a.is_empty() =>
+                                a.iter().map(|x| x.as_i64().unwrap_or(0)).collect(),
+                            _ => vec![0i64; core::blocktree::SKETCH_DIM],
+                        };
+                        let new: Vec<i64> = acc.iter().zip(sk.iter())
+                            .map(|(a, x)| (*a as i128
+                                 + (*x as i128 * core::blocktree::SKETCH_SCALE).div_euclid(n))
+                                 .clamp(i64::MIN as i128, i64::MAX as i128) as i64)
+                            .collect();
+                        e["sketch"] = serde_json::json!(new);
+                    }
+                }
             }
         }
         scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &data_addrs,
@@ -621,6 +666,7 @@ impl Node {
             data_root: palimpsest_core::token::data_root(&core_data),
             vrf_proof: hex::encode(&vrf_proof),
             score_root: core::blocktree::scores_root(&blk_scores),
+            sketch_root: core::blocktree::sketch_root(&blk_sketches),
         };
         let stored = StoredBlock {
             header: WireHeader::from_core(&header),
@@ -628,6 +674,7 @@ impl Node {
             transfers,
             data_txs,
             scores: blk_scores.clone(),
+            sketches: blk_sketches.clone(),
         };
         let mut bodies = HashMap::new();
         for t in chosen.iter() {
@@ -636,7 +683,7 @@ impl Node {
         let block = palimpsest_core::blocktree::Block {
             header, txs: chosen, bodies,
             transfers: core_transfers, data_txs: core_data,
-            scores: blk_scores,
+            scores: blk_scores, sketches: blk_sketches,
         };
         Some((stored, block))
     }
@@ -717,6 +764,7 @@ impl Node {
                         let id = tc.txid();
                         self.delta_pool.remove(&id);
                         self.delta_scores.remove(&id);
+                        self.delta_sketches.remove(&id);
                         // drop the in-memory payload only once it is confirmed on
                         // disk (the block references it; sync/replay read it back).
                         if let Some(p) = self.payloads.get(&id) {
@@ -1108,6 +1156,7 @@ pub async fn run(
                                             let id = tc.txid();
                                             node.delta_pool.remove(&id);
                                             node.delta_scores.remove(&id);
+                                            node.delta_sketches.remove(&id);
                                         }
                                     }
                                     for v in stored.transfers.iter()
@@ -1150,15 +1199,22 @@ pub async fn run(
                                                "height": height}));
                     }
                 }
-                FromBridge::Scores { height, scores } => {
-                    // rev 7: cache our trainer's held-out scores for pool deltas;
-                    // build_candidate commits them. Clamped; only for deltas we
-                    // still hold (stale responses no-op harmlessly).
+                FromBridge::Scores { height, scores, sketches } => {
+                    // rev 7/8: cache our trainer's held-out scores + influence
+                    // sketches for pool deltas; build_candidate commits them.
+                    // Clamped/shaped; only for deltas we still hold (stale
+                    // responses no-op harmlessly).
                     if height == node.head_height() {
                         for (txid, s) in scores {
                             if node.delta_pool.contains_key(&txid) {
                                 node.delta_scores.insert(
                                     txid, s.min(core::blocktree::SCORE_CAP));
+                            }
+                        }
+                        for (txid, mut sk) in sketches {
+                            if node.delta_pool.contains_key(&txid) {
+                                sk.resize(core::blocktree::SKETCH_DIM, 0);
+                                node.delta_sketches.insert(txid, sk);
                             }
                         }
                     }

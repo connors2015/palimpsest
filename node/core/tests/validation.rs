@@ -37,12 +37,13 @@ fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
         data_root: String::new(),
         vrf_proof: hex::encode(&proof),
         score_root: String::new(),
+        sketch_root: String::new(),
     }
 }
 
 fn empty_block(header: core::Header) -> Block {
     Block { header, txs: vec![], bodies: HashMap::new(), transfers: vec![], data_txs: vec![],
-            scores: Default::default() }
+            scores: Default::default(), sketches: Default::default() }
 }
 
 #[test]
@@ -117,6 +118,7 @@ fn rejects_wrong_length_delta_body() {
         transfers: vec![],
         data_txs: vec![],
         scores: Default::default(),
+        sketches: Default::default(),
     };
     let e = tree.add_block(blk).unwrap_err();
     assert!(e.0.contains("delta body length"), "got: {}", e.0);

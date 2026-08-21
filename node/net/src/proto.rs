@@ -102,6 +102,8 @@ pub struct WireHeader {
     pub vrf_proof: String,
     #[serde(default)]
     pub score_root: String,    // rev 7: commitment to the proposer's delta scores
+    #[serde(default)]
+    pub sketch_root: String,   // rev 8: commitment to the deltas' influence sketches
 }
 
 impl WireHeader {
@@ -119,6 +121,7 @@ impl WireHeader {
             data_root: self.data_root.clone(),
             vrf_proof: self.vrf_proof.clone(),
             score_root: self.score_root.clone(),
+            sketch_root: self.sketch_root.clone(),
         }
     }
 
@@ -136,6 +139,7 @@ impl WireHeader {
             data_root: h.data_root.clone(),
             vrf_proof: h.vrf_proof.clone(),
             score_root: h.score_root.clone(),
+            sketch_root: h.sketch_root.clone(),
         }
     }
 }
@@ -202,6 +206,7 @@ pub fn account_tx_to_json(t: &AccountTx) -> Value {
         AccountTx::InferenceReceipt(x) => json!({"kind": "inference",
             "payer_pub": x.payer_pub, "server_addr": x.server_addr, "fee": x.fee,
             "output_hash": x.output_hash, "head_root": x.head_root, "nonce": x.nonce,
+            "answer_sketch": x.answer_sketch,
             "sig": hex::encode(&x.sig)}),
     }
 }
@@ -242,6 +247,9 @@ pub fn account_tx_from_json(v: &Value) -> Option<AccountTx> {
             fee: v["fee"].as_u64()?,
             output_hash: v["output_hash"].as_str()?.into(),
             head_root: v["head_root"].as_str()?.into(),
+            answer_sketch: v.get("answer_sketch").and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+                .unwrap_or_default(),
             nonce: v["nonce"].as_u64()?, sig,
         }),
         _ => return None,
@@ -257,6 +265,8 @@ pub struct StoredBlock {
     pub data_txs: Vec<Value>,  // account-tx JSON (data lane)
     #[serde(default)]
     pub scores: std::collections::BTreeMap<String, u64>, // rev 7: txid -> score
+    #[serde(default)]
+    pub sketches: std::collections::BTreeMap<String, Vec<i32>>, // rev 8: txid -> sketch
 }
 
 impl StoredBlock {
@@ -287,7 +297,7 @@ impl StoredBlock {
             data_txs.push(account_tx_from_json(v)?);
         }
         Some(Block { header: self.header.to_core(), txs, bodies, transfers, data_txs,
-                     scores: self.scores.clone() })
+                     scores: self.scores.clone(), sketches: self.sketches.clone() })
     }
 }
 

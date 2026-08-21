@@ -320,6 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         payloads,
         delta_pool: Default::default(),
         delta_scores: Default::default(),
+        delta_sketches: Default::default(),
         omitted_deltas: Default::default(),
         account_pool: Default::default(),
         pending: Default::default(),

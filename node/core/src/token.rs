@@ -103,6 +103,12 @@ pub struct InferenceReceiptTx {
     pub output_hash: String,
     pub head_root: String,
     pub nonce: u64,
+    // rev 8: the ANSWER SKETCH — the emitted answer's loss-gradient projected
+    // through the shared seeded matrix, quantized. The fee's data slice splits
+    // across corpora by positive alignment with their accumulated ledger
+    // sketches; empty = unsketched → the slice pools. Committed in the payer's
+    // signature; recomputable from the output + head_root model (challengeable).
+    pub answer_sketch: Vec<i64>,
     pub sig: Vec<u8>,
 }
 
@@ -119,9 +125,14 @@ pub enum AccountTx {
 
 impl InferenceReceiptTx {
     pub fn signing_bytes(&self) -> Vec<u8> {
+        // rev 8: one framed field appends the compact JSON of the answer sketch —
+        // serde_json's "[1,-2]" is byte-identical to the rig's
+        // json.dumps(sk, separators=(",",":")), and "[]" when empty.
+        let sk = serde_json::to_string(&self.answer_sketch).unwrap();
         crate::frame(&[b"inference", self.payer_pub.as_bytes(), self.server_addr.as_bytes(),
                        self.fee.to_string().as_bytes(), self.output_hash.as_bytes(),
-                       self.head_root.as_bytes(), self.nonce.to_string().as_bytes()])
+                       self.head_root.as_bytes(), self.nonce.to_string().as_bytes(),
+                       sk.as_bytes()])
     }
 }
 
@@ -520,8 +531,45 @@ impl TokenLedger {
                 let data_cut = t.fee * FEE_SHARE_DATA / 10_000;
                 let train_cut = t.fee * FEE_SHARE_TRAIN / 10_000;
                 self.credit(&t.server_addr, t.fee - data_cut - train_cut);
-                self.fee_data_pool = self.fee_data_pool.saturating_add(data_cut);
                 self.fee_train_pool = self.fee_train_pool.saturating_add(train_cut);
+                // rev 8 USAGE ATTRIBUTION: if the receipt carries an answer
+                // sketch, the data slice pays the corpora whose accumulated
+                // ledger sketches POSITIVELY align with it (∝ dot product —
+                // data that pushed against the answer earns nothing), directly.
+                // Unsketched receipts / no positive alignment → the slice pools
+                // as before. i128 dots; mirrors rig.token.apply_data_tx.
+                let mut paid_direct = false;
+                if t.answer_sketch.iter().any(|x| *x != 0) {
+                    let mut aligns: BTreeMap<String, i128> = BTreeMap::new();
+                    for e in self.registry.values() {
+                        if e["status"] != "active" {
+                            continue;
+                        }
+                        let Some(sk) = e.get("sketch").and_then(|v| v.as_array()) else { continue };
+                        if sk.is_empty() {
+                            continue;
+                        }
+                        let d: i128 = sk.iter().zip(t.answer_sketch.iter())
+                            .map(|(a, b)| a.as_i64().unwrap_or(0) as i128 * *b as i128)
+                            .sum();
+                        if d > 0 {
+                            if let Some(owner) = e["owner"].as_str() {
+                                *aligns.entry(owner.to_string()).or_insert(0) += d;
+                            }
+                        }
+                    }
+                    let total: i128 = aligns.values().sum();
+                    if total > 0 {
+                        for (owner, a) in &aligns {        // BTreeMap = sorted owners
+                            let share = (data_cut as i128 * a / total) as u64;
+                            self.credit(owner, share);      // dust burned
+                        }
+                        paid_direct = true;
+                    }
+                }
+                if !paid_direct {
+                    self.fee_data_pool = self.fee_data_pool.saturating_add(data_cut);
+                }
             }
             AccountTx::Transfer(_) => return false,
         }

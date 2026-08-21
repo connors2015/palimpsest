@@ -130,13 +130,15 @@ def main():
     h = Header(height=5, prev_hash="ab" * 32, state_root="cd" * 32,
                txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub,
                transfer_root="12" * 32, ledger_root="34" * 32,
-               data_root="56" * 32, vrf_proof="ab" * 32, score_root="77" * 32)
+               data_root="56" * 32, vrf_proof="ab" * 32, score_root="77" * 32,
+               sketch_root="88" * 32)
     v["header"] = [{
         "height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
         "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
         "proposer": h.proposer, "transfer_root": h.transfer_root,
         "ledger_root": h.ledger_root, "data_root": h.data_root,
         "vrf_proof": h.vrf_proof, "score_root": h.score_root,
+        "sketch_root": h.sketch_root,
         "canonical_json": json.dumps(h.__dict__, sort_keys=True),
         "hash": h.block_hash(),
     }]
@@ -253,6 +255,7 @@ def main():
     v["inference"] = [{
         "payer_pub": key.pub, "server_addr": server, "fee": fee,
         "output_hash": "aa" * 32, "head_root": "bb" * 32, "nonce": 0,
+        "answer_sketch": [],
         "signing_bytes_hex": rcpt.signing_bytes().hex(), "txid": rcpt.txid(),
         "sig_hex": rcpt.sig.hex(),
         "payer_after": ledr.balance(payer_addr), "server_after": ledr.balance(server),
@@ -342,6 +345,51 @@ def main():
         "equal_root": led_z.root(),
     }]
 
+    # --- influence sketches (rev 8): projection exactness, block accrual, and
+    #     the usage-attributed receipt split (aligned -> direct; anti -> pooled)
+    from rig.sketch import sketch_sparse
+    from rig.blockchain import SKETCH_DIM, sketch_root as _skroot
+    from rig.token import InferenceReceiptTx as _IRT
+    sk_vec = sketch_sparse([3, 17, 41, 999], [5, -2, 7, 100])
+    sk_own = Key.generate(b"sketch-owner-0000000000000000000")
+    sk_pay = Key.generate(b"sketch-payer-0000000000000000000")
+    sk_srv = Key.generate(b"sketch-server-000000000000000000")
+    led_k = TokenLedger()
+    led_k.registry["corpusS"] = {"owner": address(sk_own.pub), "data_hash": "corpusS",
+                                 "size": 0, "media_type": "text", "stake": 0,
+                                 "weight": 1, "status": "active",
+                                 "sketch": [3] * SKETCH_DIM}
+    led_k.apply_reward(1, [sk_pay.pub], "genesis", [])
+    fee_k = 10_000
+    r_pos = _IRT(payer_pub=sk_pay.pub, server_addr=address(sk_srv.pub), fee=fee_k,
+                 output_hash="aa" * 32, head_root="bb" * 32, nonce=0,
+                 answer_sketch=[1] * SKETCH_DIM).signed(sk_pay)
+    assert led_k.apply_data_tx(r_pos, 2, set())
+    bal_own_pos, pool_pos, root_pos = (led_k.balance(address(sk_own.pub)),
+                                       led_k.fee_data_pool, led_k.root())
+    r_neg = _IRT(payer_pub=sk_pay.pub, server_addr=address(sk_srv.pub), fee=fee_k,
+                 output_hash="aa" * 32, head_root="bb" * 32, nonce=1,
+                 answer_sketch=[-1] * SKETCH_DIM).signed(sk_pay)
+    assert led_k.apply_data_tx(r_neg, 3, set())
+    v["sketches"] = [{
+        "sparse_indices": [3, 17, 41, 999], "sparse_values": [5, -2, 7, 100],
+        "sketch": sk_vec,
+        "sketch_root": _skroot({"tx0": sk_vec}),
+        "owner": address(sk_own.pub), "payer": sk_pay.pub,
+        "server": address(sk_srv.pub), "fee": fee_k,
+        "corpus_sketch_entry": 3, "dim": SKETCH_DIM,
+        "aligned": {"answer_entry": 1, "owner_after": bal_own_pos,
+                    "fee_data_pool_after": pool_pos, "root_after": root_pos,
+                    "signing_bytes_hex": r_pos.signing_bytes().hex(),
+                    "sig_hex": r_pos.sig.hex()},
+        "anti": {"answer_entry": -1,
+                 "owner_after": led_k.balance(address(sk_own.pub)),
+                 "fee_data_pool_after": led_k.fee_data_pool,
+                 "root_after": led_k.root(),
+                 "signing_bytes_hex": r_neg.signing_bytes().hex(),
+                 "sig_hex": r_neg.sig.hex()},
+    }]
+
     # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----
     from rig import da as _da
     da_body = bytes((i * 7 + 3) % 256 for i in range(100))
@@ -421,10 +469,13 @@ def main():
         # rev 7: distinct nonzero committed scores lock score_root + the
         # score-weighted miner split + score-weighted data credits
         scr = {t.txid(): 100_000 * (i + 1) for i, t in enumerate(txs)}
+        # rev 8: real sketches of the delta bodies lock sketch_root + accrual
+        from rig.sketch import sketch_dense as _skd
+        skt = {t.txid(): _skd(bodies[t.da_pointer].tolist()) for t in txs}
         blk = build_block(tree, parent, txs, bodies,
                           {t.txid(): 1.0 for t in txs}, proposer_key,
                           transfers=list(transfers), data_txs=list(data_txs),
-                          scores=scr)
+                          scores=scr, sketches=skt)
         tree.add_block(blk)
         blocks_out.append({
             "parent": parent, "hash": blk.hash,
@@ -435,6 +486,7 @@ def main():
                      "data_refs": t.canonical_refs(), "sig_hex": t.sig.hex()}
                     for t in txs],
             "scores": blk.scores,
+            "sketches": blk.sketches,
             "bodies": {p: b.tolist() for p, b in blk.bodies.items()},
             "transfers": [{"from_pub": t.from_pub, "to_addr": t.to_addr,
                            "amount": t.amount, "nonce": t.nonce,

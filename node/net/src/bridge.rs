@@ -38,7 +38,8 @@ pub enum FromBridge {
     NeedState,
     Generated { text: String, height: u64 },
     /// rev 7: micro-nat held-out-loss improvements per txid.
-    Scores { height: u64, scores: Vec<(String, u64)> },
+    Scores { height: u64, scores: Vec<(String, u64)>,
+             sketches: Vec<(String, Vec<i32>)> },
 }
 
 async fn write_frame<W: AsyncWriteExt + Unpin>(s: &mut W, bytes: &[u8]) -> std::io::Result<()> {
@@ -104,9 +105,22 @@ async fn serve_one(
                             .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s)))
                             .collect())
                         .unwrap_or_default();
+                    // rev 8: influence sketches ride alongside the scores;
+                    // entries clamp into i32 (the committed sketch type).
+                    let sketches = v["sketches"].as_object()
+                        .map(|m| m.iter()
+                            .filter_map(|(k, x)| x.as_array().map(|a| (
+                                k.clone(),
+                                a.iter().map(|e| e.as_i64().unwrap_or(0)
+                                    .clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+                                    .collect::<Vec<i32>>(),
+                            )))
+                            .collect())
+                        .unwrap_or_default();
                     let _ = ev.send(FromBridge::Scores {
                         height: v["height"].as_u64().unwrap_or(0),
                         scores,
+                        sketches,
                     }).await;
                 }
                 _ => {}

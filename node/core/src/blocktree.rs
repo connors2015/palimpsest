@@ -18,11 +18,33 @@ pub struct Block {
     pub transfers: Vec<TransferTx>,
     pub data_txs: Vec<AccountTx>,          // rev 3: Data{Submit,Challenge,Vote}
     pub scores: BTreeMap<String, u64>,     // rev 7: txid -> micro-nat held-out score
+    pub sketches: BTreeMap<String, Vec<i32>>, // rev 8: txid -> [i32; SKETCH_DIM]
 }
 
 /// rev 7: a delta's score = its held-out loss improvement in micro-nats, >= 0,
 /// clamped by consensus so a lying proposer can't mint unbounded weight.
 pub const SCORE_CAP: u64 = 1_000_000_000;
+
+/// rev 8: influence-sketch dimensionality (one sha256 of sign bits per index in
+/// the rig's implicit projection; consensus only carries the committed values).
+pub const SKETCH_DIM: usize = 256;
+/// Published projection seed + fixed-point scale (rig/sketch.py) — consensus
+/// never recomputes sketches, but the constants are part of the protocol.
+pub const SKETCH_SEED: u64 = 1234;
+pub const SKETCH_SCALE: i128 = 10_000;
+
+/// Canonical commitment to {txid: [ints; SKETCH_DIM]}: sorted compact JSON —
+/// byte-identical to rig `json.dumps(sketches, sort_keys=True, separators=(",",":"))`.
+pub fn sketch_root(sketches: &BTreeMap<String, Vec<i32>>) -> String {
+    crate::sha256_hex_pub(serde_json::to_string(sketches).unwrap().as_bytes())
+}
+
+/// Saturate a big-int accumulation into i64 — mirrors rig `_sat64` exactly
+/// (clamped to [i64::MIN, i64::MAX]) so ledger sketch accumulators can never
+/// overflow/diverge between implementations.
+fn sat64(x: i128) -> i64 {
+    x.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
 
 /// Canonical commitment to {txid: score}: sorted compact JSON, hashed. BTreeMap
 /// + serde_json compact output is byte-identical to the rig's
@@ -139,6 +161,20 @@ pub fn validate_block(
     if scores_root(&block.scores) != h.score_root {
         return Err(err("score_root mismatch"));
     }
+    // 2c. INFLUENCE SKETCHES (rev 8): one committed sketch per included tx,
+    //     SKETCH_DIM ints each within i32 (an all-zero sketch = "unsketched",
+    //     contributing nothing to attribution), and the commitment reproduces.
+    //     Entry range is enforced by the i32 type; only shape can be wrong.
+    let sketch_keys: BTreeSet<&String> = block.sketches.keys().collect();
+    if sketch_keys != txid_set {
+        return Err(err("sketches must cover exactly the included txs"));
+    }
+    if block.sketches.values().any(|v| v.len() != SKETCH_DIM) {
+        return Err(err("sketch malformed"));
+    }
+    if sketch_root(&block.sketches) != h.sketch_root {
+        return Err(err("sketch_root mismatch"));
+    }
     // 3. weight-state transition reproduces the committed root
     let w = if block.txs.is_empty() {
         parent_w.to_vec()
@@ -196,13 +232,47 @@ pub fn validate_block(
         .collect();
     let mut miner_weights: BTreeMap<String, u64> = Default::default();
     let mut data_credits: BTreeMap<String, u64> = Default::default();
+    // rev 8: data_hash -> registry KEY of its active entry, for sketch accrual
+    // (active-only, NOT weight-gated — mirrors rig hash_to_entry).
+    let hash_to_key: BTreeMap<String, String> = led.registry.iter()
+        .filter(|(_, e)| e["status"] == "active")
+        .filter_map(|(k, e)| Some((e["data_hash"].as_str()?.to_string(), k.clone())))
+        .collect();
     for tx in &block.txs {
-        let s = eff[&tx.txid()];
+        let txid = tx.txid();
+        let s = eff[&txid];
         *miner_weights.entry(tx.miner.clone()).or_insert(0) += s;
         let named: Vec<String> = tx.canonical_refs().into_iter()
             .filter(|r| active_set.contains(r)).collect();
         for r in &named {
             *data_credits.entry(r.clone()).or_insert(0) += s * 10_000 / named.len() as u64;
+        }
+        // rev 8: accrue this delta's committed influence sketch onto the corpora
+        // it named — a corpus's ledger sketch = Σ (its deltas' sketches), the
+        // projection of its total contribution to the weights. Saturating i64;
+        // floor division (rig `//`, positive divisor) = div_euclid. Mirrors
+        // rig.blockchain.apply_ledger.
+        let sk = &block.sketches[&txid];
+        if sk.iter().any(|x| *x != 0) {
+            let named_keys: Vec<&String> = tx.canonical_refs().iter()
+                .filter_map(|r| hash_to_key.get(r))
+                .collect::<Vec<_>>();
+            let n = named_keys.len() as i128;
+            if n > 0 {
+                for key in named_keys {
+                    let e = led.registry.get_mut(key).unwrap();
+                    let acc: Vec<i64> = match e.get("sketch").and_then(|v| v.as_array()) {
+                        Some(a) if !a.is_empty() =>
+                            a.iter().map(|x| x.as_i64().unwrap_or(0)).collect(),
+                        _ => vec![0i64; SKETCH_DIM],
+                    };
+                    let new: Vec<i64> = acc.iter().zip(sk.iter())
+                        .map(|(a, x)| sat64(*a as i128
+                             + (*x as i128 * SKETCH_SCALE).div_euclid(n)))
+                        .collect();
+                    e["sketch"] = serde_json::json!(new);
+                }
+            }
         }
     }
     led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs, &data_credits,
@@ -264,6 +334,7 @@ pub fn genesis_header(genesis_w: &[i64]) -> Header {
         data_root: String::new(),
         vrf_proof: String::new(),
         score_root: String::new(),
+        sketch_root: String::new(),
     }
 }
 

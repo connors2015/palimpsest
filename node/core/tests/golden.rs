@@ -125,6 +125,7 @@ fn header_from(case: &Value) -> core::Header {
         data_root: case["data_root"].as_str().unwrap_or("").into(),
         vrf_proof: case["vrf_proof"].as_str().unwrap_or("").into(),
         score_root: case["score_root"].as_str().unwrap_or("").into(),
+        sketch_root: case["sketch_root"].as_str().unwrap_or("").into(),
     }
 }
 
@@ -268,6 +269,7 @@ fn fee_flows_match_reference() {
             output_hash: case["output_hash"].as_str().unwrap().into(),
             head_root: case["head_root"].as_str().unwrap().into(),
             nonce: case["nonce"].as_u64().unwrap(),
+            answer_sketch: vec![],
             sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
         });
         assert!(led.apply_data_tx(&rcpt, 1, &HashSet::new()), "receipt must apply");
@@ -405,7 +407,17 @@ fn full_chain_replay_matches_reference() {
                         .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s)))
                         .collect())
                     .unwrap_or_default();
-            tree.add_block(Block { header, txs, bodies, transfers, data_txs, scores })
+            let sketches: std::collections::BTreeMap<String, Vec<i32>> =
+                b.get("sketches").and_then(|v| v.as_object())
+                    .map(|m| m.iter()
+                        .filter_map(|(k, x)| x.as_array().map(|a| (
+                            k.clone(),
+                            a.iter().map(|e| e.as_i64().unwrap_or(0) as i32).collect(),
+                        )))
+                        .collect())
+                    .unwrap_or_default();
+            tree.add_block(Block { header, txs, bodies, transfers, data_txs, scores,
+                                   sketches })
                 .expect("reference block must validate");
         }
         assert_eq!(tree.head, case["expected_head"].as_str().unwrap(),
@@ -551,6 +563,7 @@ fn inference_receipt_matches_reference() {
             output_hash: case["output_hash"].as_str().unwrap().into(),
             head_root: case["head_root"].as_str().unwrap().into(),
             nonce: case["nonce"].as_u64().unwrap(),
+            answer_sketch: vec![],
             sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
         });
         assert_eq!(hex::encode(rcpt.signing_bytes()),
@@ -563,5 +576,70 @@ fn inference_receipt_matches_reference() {
         assert_eq!(led.balance(case["server_addr"].as_str().unwrap()),
                    case["server_after"].as_u64().unwrap());
         assert_eq!(led.root(), case["root_after"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn sketches_match_reference() {
+    // rev 8: sketch_root canonical form, the alignment-split receipt (aligned ->
+    // owner paid directly, anti-aligned -> pooled), signing-bytes parity for
+    // the answer_sketch framed field. Delta-sketch VALUES are committed data
+    // (the hash projection lives in the rig only), so the vector supplies them.
+    use palimpsest_core::blocktree::{sketch_root, SKETCH_DIM};
+    use palimpsest_core::token::{AccountTx, InferenceReceiptTx, TokenLedger};
+    use std::collections::{BTreeMap, HashSet};
+    for case in vectors()["sketches"].as_array().unwrap() {
+        let sk: Vec<i32> = case["sketch"].as_array().unwrap()
+            .iter().map(|x| x.as_i64().unwrap() as i32).collect();
+        assert_eq!(sk.len(), SKETCH_DIM);
+        let m: BTreeMap<String, Vec<i32>> = [("tx0".to_string(), sk)].into();
+        assert_eq!(sketch_root(&m), case["sketch_root"].as_str().unwrap(),
+                   "sketch_root canonical JSON drift");
+        let dim = case["dim"].as_u64().unwrap() as usize;
+        let owner = case["owner"].as_str().unwrap();
+        let payer = case["payer"].as_str().unwrap();
+        let mut led = TokenLedger::new();
+        led.registry.insert("corpusS".into(), serde_json::json!({
+            "owner": owner, "data_hash": "corpusS", "size": 0,
+            "media_type": "text", "stake": 0, "weight": 1, "status": "active",
+            "sketch": vec![case["corpus_sketch_entry"].as_i64().unwrap(); dim]}));
+        led.apply_reward(1, &[payer.to_string()], "genesis", &[],
+                         &Default::default(), &Default::default());
+        let mk = |nonce: u64, entry: i64, sig_hex: &str| {
+            AccountTx::InferenceReceipt(InferenceReceiptTx {
+                payer_pub: payer.into(),
+                server_addr: case["server"].as_str().unwrap().into(),
+                fee: case["fee"].as_u64().unwrap(),
+                output_hash: "aa".repeat(32), head_root: "bb".repeat(32),
+                nonce,
+                answer_sketch: vec![entry; dim],
+                sig: hex::decode(sig_hex).unwrap(),
+            })
+        };
+        let a = &case["aligned"];
+        let pos = mk(0, a["answer_entry"].as_i64().unwrap(),
+                     a["sig_hex"].as_str().unwrap());
+        if let AccountTx::InferenceReceipt(t) = &pos {
+            assert_eq!(hex::encode(t.signing_bytes()),
+                       a["signing_bytes_hex"].as_str().unwrap(),
+                       "answer_sketch framed-field drift");
+        }
+        assert!(led.apply_data_tx(&pos, 2, &HashSet::new()));
+        assert_eq!(led.balance(owner), a["owner_after"].as_u64().unwrap(),
+                   "aligned answer must pay the owner directly");
+        assert_eq!(led.fee_data_pool, a["fee_data_pool_after"].as_u64().unwrap());
+        assert_eq!(led.root(), a["root_after"].as_str().unwrap());
+        let n = &case["anti"];
+        let neg = mk(1, n["answer_entry"].as_i64().unwrap(),
+                     n["sig_hex"].as_str().unwrap());
+        if let AccountTx::InferenceReceipt(t) = &neg {
+            assert_eq!(hex::encode(t.signing_bytes()),
+                       n["signing_bytes_hex"].as_str().unwrap());
+        }
+        assert!(led.apply_data_tx(&neg, 3, &HashSet::new()));
+        assert_eq!(led.balance(owner), n["owner_after"].as_u64().unwrap(),
+                   "anti-aligned answer must NOT pay the owner");
+        assert_eq!(led.fee_data_pool, n["fee_data_pool_after"].as_u64().unwrap());
+        assert_eq!(led.root(), n["root_after"].as_str().unwrap());
     }
 }
