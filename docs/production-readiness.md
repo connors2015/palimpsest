@@ -101,6 +101,12 @@ The single-operator devnet can't validate these; the testnet is their gate.
 - 141 sketch-based usage attribution for the fee data pool (§8) — the pool +
   pro-rata drain are ✅ live; the sketch commitment/verification pipeline rides
   on the same off-chain-eval infrastructure as the 108 committee
+- large-corpus DA ingestion — staked corpora register hash+stake on-chain and
+  are challengeable ("availability"), but the DA byte-store path (built for
+  ~13MB delta bodies; 64MB API cap) cannot ingest multi-GB corpora yet; a
+  chunked content-addressed manifest format is needed before third-party data
+  at scale. Devnet corpora (18GB/1.8GB) are served from the operators'
+  always-on machines in the interim.
 - ✅ 109 delta stake bond DONE (see above); slashing automation gates on the
   108 committee (testnet)
 - ✅ 111/112 DA routing DONE at the storage layer: bodies are erasure-coded into
