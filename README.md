@@ -1,69 +1,175 @@
 # Palimpsest
 
-A blockchain whose state is the weights of a single public neural network.
-Transactions are the model's own computations: backprops transition the state
-and earn rewards; forward-props pay the fees that fund them. Replaying the
-chain reconstructs the model bit-for-bit. The chain does not record a model —
-the chain *is* a model.
+**A blockchain whose state is the weights of a single public neural network.**
 
-Data is a priced, owned input: contributors stake behind submissions, earn the
-block data share, and face an on-chain challenge market. The token is native
-chain state — fair-launched, emissions halving to a hard sunset, every grain
-minted by verifiable work.
+Transactions are the model's own computations. A *backprop* is a signed gradient
+that transitions the state and earns a reward; a *forward-prop* is an inference
+that pays a fee. Replaying the chain from genesis reconstructs the model
+bit-for-bit. The chain does not *record* a model — the chain **is** a model, and
+it trains itself in public, paying the people who train it.
 
-> **Status — honest map.** This is an active Phase-0/1 project. What is
-> *enforced in the shipping node today* versus what is *designed or testnet-phase*
-> is tracked precisely in **[docs/production-readiness.md](docs/production-readiness.md)**
-> and **[docs/internal/threat-model.md](docs/internal/threat-model.md)**. In
-> short: all consensus-safety and runtime hardening, verifiable VRF proposer
-> sortition + non-forgeable work, Byzantine-robust aggregation, erasure-coded
-> multi-node data availability, the stake-bond admission cost, and fee-bearing
-> inference are implemented and pinned to the reference by golden vectors. Delta
-> loss-scoring, cross-inclusion, and the threshold-BLS beacon remain testnet-phase
-> (they need live compute + a running network). The network is **open** — anyone
-> can join from one peer address + the published genesis id (see
-> **[docs/joining.md](docs/joining.md)**). Launch is phased: a small monitored
-> devnet → testnet → open mainnet.
+No company owns the weights. No API key gates them. You download the chain, replay
+it, and you are holding the same model everyone else is — plus the ledger that
+says who trained it and who paid for it.
+
+## How it works
+
+- **State = weights.** Genesis is a from-scratch model. Each block commits an
+  aggregated gradient delta and a new `state_root`. `weights = genesis + Σ deltas`.
+- **Mining = training.** Miners pull the head weights, train locally (any GPU —
+  the network already trains cross-vendor, Apple MPS + NVIDIA CUDA, with no
+  coordinator), and submit compressed int-quantized deltas. Included deltas earn
+  the block reward.
+- **Fees = inference.** Anyone can run the model. A forward-prop is a signed,
+  fee-bearing receipt that settles from the payer to the server on-chain.
+- **Data is staked, owned, and paid.** Training corpus lives off-chain; the chain
+  holds only its hash, its owner, and a stake bond. Good data earns a share of
+  every block trained on it; bad data can be challenged and slashed.
+- **The token is the model's own money.** Fair launch, every grain minted by
+  verifiable work, emissions halving to a hard sunset. It exists to pay trainers
+  and price inference — nothing is pre-mined.
+
+## Start in two lines
+
+**See it run, locally, right now** — a real PyTorch model training through a
+local chain, loss falling live in your browser, chat with the head:
+
+```bash
+uv run --with torch --with numpy --with pynacl python -m client.watch --demo
+```
+
+**Join the live network** — build the node and point it at a peer; it fetches the
+genesis from that peer, verifies it against the published id, and syncs:
+
+```bash
+cd node && cargo build --release
+target/release/palimpsest-node --data-dir ~/.palimpsest \
+  --wallet ~/.palimpsest/wallet.json \
+  --peers /ip4/<SEED_IP>/udp/9800/quic-v1 --genesis-hash <PUBLISHED_GENESIS_ID>
+```
+
+`<SEED_IP>` and `<PUBLISHED_GENESIS_ID>` are published by the network at launch —
+see **[docs/joining.md](docs/joining.md)**. Make a wallet first with
+`python -m client.wallet new` (that file is your on-chain identity *and* your
+balance). Your node now serves a dashboard + API at `http://localhost:8090`.
+
+## Three ways to participate
+
+Pick one or all three. They share one economic loop: **you earn coins by
+training, and you spend coins to submit data — which then earns you coins back
+every time the model trains on it.**
+
+| Role | You do | You earn |
+|---|---|---|
+| **⛏ Mine** | run the node with `--produce` and attach the trainer; it trains the head and submits deltas | block rewards for every included delta |
+| **🔌 Serve** | run an inference bridge; answer `POST /inference` calls | the fee on every request, settled to your wallet |
+| **📚 Give data** | stake coins behind a corpus you own | a share of every block reward trained on your data |
+
+Every block reward splits three ways: the **trainers** whose deltas landed, the
+block's **proposer**, and the **data** that trained them. That is why you must
+*stake* to submit data — the stake is your skin in the game against a challenge
+market, and it's paid in coins you got by mining.
+
+### Mine (train the model, earn rewards)
+
+Run the node in producing mode and attach the PyTorch trainer over the local
+bridge. The trainer pulls head weights, trains on your corpus, and hands back
+compressed deltas the node gossips:
+
+```bash
+target/release/palimpsest-node ... --produce --bridge-port 7999
+python -m client.miner_bridge --node-port 7999 --model small --data corpus.txt --device cuda
+```
+
+A better-scoring delta earns more of the block reward. The proposer lottery is
+stake-weighted VRF sortition, so more stake means more blocks you get to propose.
+
+### Give data (stake to submit, earn the data share)
+
+Training data stays off your machine's business and off the chain — only its
+`sha256`, size, media type, owner, and stake bond go on-chain. Submit from a
+funded wallet:
+
+```bash
+python -m client.wallet submit-data --file corpus.txt --stake 10 --media-type text
+```
+
+That locks a `10`-coin bond and registers you as the owner. From then on, every
+block whose training touched your data pays you a slice of the data share. If
+someone thinks your data is invalid or not yours, they open a challenge; a
+disinterested-juror quorum votes, and a loser is slashed. Watch the registry with
+`python -m client.wallet registry`.
+
+> Prefer to push raw bytes through the node instead of just the hash? `POST
+> /upload` takes the file, stakes from the node's own wallet, and stores it in the
+> content-addressed DA layer. It requires `PALIMPSEST_API_TOKEN` (Bearer) and a
+> funded node wallet — see [docs/joining.md](docs/joining.md).
+
+### Serve the API (answer inference, earn fees)
+
+Every node already serves an HTTP API and a dashboard on `--api-port` (default
+`8090`):
+
+```
+GET  /            dashboard (blocks, loss, chat)     GET  /status   height, peers, supply
+GET  /balance     ?addr=…                            GET  /chain    recent blocks
+GET  /metrics     Prometheus                          GET  /data/registry
+POST /inference   signed, fee-bearing forward-prop   POST /transfer  move coins
+POST /data/submit staked data                        POST /chat     (token-gated) talk to the head
+```
+
+To sell inference, run a serve-only bridge; callers pay per request with a signed
+receipt that settles payer → your wallet on-chain:
+
+```bash
+python -m client.miner_bridge --node-port 7999 --model small --serve-only
+# callers: POST http://<you>:8090/inference  { prompt, fee, signature } → answer + on-chain receipt
+```
+
+Keep mutating endpoints (`/chat`, `/upload`) behind `PALIMPSEST_API_TOKEN`, and
+don't expose them to the open internet unauthenticated. See the
+[threat model](docs/internal/threat-model.md).
 
 ## The map
 
 | Path | What it is |
 |---|---|
 | **[WHITEPAPER.md](WHITEPAPER.md)** | the master design document (§1–12) — invariants: bytes-only interface, RoPE positions, from-scratch genesis, fair launch |
-| **client/** | the Python client: real PyTorch GPT trained *through the chain* (gossip consensus, DiLoCo deltas, 50× compression), the chain watcher web UI (`watch.py`), the wallet, DiPaCo sharding, content-addressed storage |
+| **[docs/joining.md](docs/joining.md)** | the tester's join guide — the three public things you need and the exact run command |
+| **client/** | the Python client: real PyTorch GPT trained *through the chain*, the wallet CLI, the `watch.py` web UI, DiPaCo sharding, content-addressed storage |
 | **rig/** | the reference implementation — consensus, token ledger + data lane, DA, beacon, economics; the SPEC the Rust node must match |
 | **node/** | the Rust node: `palimpsest-core` (bit-exact consensus, pinned to the reference by golden vectors) + `palimpsest-node` (libp2p GossipSub/QUIC networking) |
-| **docs/** | including **[genesis-ceremony.md](docs/genesis-ceremony.md)** — how the real network launches |
+| **docs/** | including **[genesis-ceremony.md](docs/genesis-ceremony.md)** — how the real network launches, and **[production-readiness.md](docs/production-readiness.md)** — the go/no-go tracker |
 | **deploy/** | the bootstrap seed node (Kubernetes) |
 
-## Quick starts
+## Status — honest map
+
+This is an active Phase-0/1 project, and the README above describes what the
+shipping node actually does. What is *enforced in code today* versus *designed /
+testnet-phase* is tracked precisely in
+**[docs/production-readiness.md](docs/production-readiness.md)** and
+**[docs/internal/threat-model.md](docs/internal/threat-model.md)**.
+
+Enforced and pinned to the reference by golden vectors: all consensus-safety and
+runtime hardening, verifiable VRF proposer sortition + non-forgeable work,
+Byzantine-robust aggregation, erasure-coded multi-node data availability, the
+stake-bond admission cost, and fee-bearing inference. Still testnet-phase (they
+need live compute + a running network): delta loss-scoring, cross-inclusion, and
+the threshold-BLS beacon.
+
+The network is **open** — permissionless, like Bitcoin: anyone joins from one
+peer address plus the published genesis id. Launch is deliberately phased —
+a small, monitored, low-value devnet → testnet → open mainnet — because until
+delta scoring is enforced on-chain, the aggregation defense assumes an honest
+majority. Run it with people you can watch and treat early rewards as testnet
+play. Reproduce the guarantees yourself:
 
 ```bash
-# watch a live local chain in your browser (blocks, loss falling, chat with the model):
-uv run --with torch --with numpy --with pynacl python -m client.watch --demo
-
-# a wallet (encrypted file + BIP39 mnemonic + pal1… checksummed address):
-pip install pynacl mnemonic bech32 && python -m client.wallet new
-
-# the Rust devnet — three nodes gossip, validate, and converge over libp2p:
-scripts/devnet.sh 30
-
-# the reference test suites:
 uv run --with torch --with numpy --with pynacl --with py_ecc --with pytest \
-    python -m pytest tests/ -q          # Python reference (163 tests)
-cd node && cargo test                   # Rust vs golden vectors (13 families)
+    python -m pytest tests/ -q          # Python reference
+cd node && cargo test                   # Rust node vs golden vectors
+scripts/devnet.sh 30                    # three nodes gossip, validate, converge
 ```
-
-## Status
-
-Phase 0/1 — mechanisms proven, pre-launch. Verified to date: real cross-GPU
-training through the chain (Apple MPS + CUDA, no coordinator, byte-identical
-heads); an 86M-parameter model trained from scratch *on-chain*; the token
-economy live end-to-end (mining rewards, transfers, staked data submissions,
-challenges — all committed by ledger roots in block headers); the Rust node
-devnet converging bit-exactly with the Python reference. Before mainnet:
-NAT traversal for public volunteers, external audit, legal counsel on the
-token, and the genesis ceremony (docs/genesis-ceremony.md).
 
 ## License
 
