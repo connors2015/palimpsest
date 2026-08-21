@@ -91,7 +91,9 @@ pub fn validate_block(
             .map(|t| block.bodies[&t.da_pointer].clone())
             .collect();
         let mean = trimmed_mean(&deltas, 0.2);
-        parent_w.iter().zip(&mean).map(|(a, b)| a + b).collect()
+        // numpy int64 add wraps on overflow; mirror it so the state transition
+        // is bit-identical to the reference (and never panics a debug build).
+        parent_w.iter().zip(&mean).map(|(a, b)| a.wrapping_add(*b)).collect()
     };
     if state_root(&w) != h.state_root {
         return Err(err("state_root does not reproduce from txs"));
@@ -218,7 +220,11 @@ impl BlockTree {
             self.data_contributor.as_deref(),
             &jurors,
         )?;
-        let work = self.cum_work[&parent] + block.header.work.max(1);
+        // saturating: header.work is not yet cryptographically constrained
+        // (see the proposer-eligibility work), so a peer could claim a huge
+        // value; saturating_add keeps fork-choice bookkeeping panic-free and
+        // deterministic until work is validated at its source.
+        let work = self.cum_work[&parent].saturating_add(block.header.work.max(1));
         self.blocks.insert(bh.clone(), block.header);
         self.state.insert(bh.clone(), w);
         self.ledger.insert(bh.clone(), led);

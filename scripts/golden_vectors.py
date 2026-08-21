@@ -67,6 +67,14 @@ def main():
            np.array([2, -7, -9], dtype=np.int64)]
     cases.append({"deltas": [d.tolist() for d in neg],
                   "mean": trimmed_mean_int(neg).tolist()})   # exercises floor(-x/k)
+    # OVERFLOW: three near-max int64 values sum past i64::MAX. numpy int64 sum
+    # WRAPS (two's complement); the Rust node must wrap identically (wrapping_add,
+    # not a debug-panicking `+`) or it forks / crashes on a crafted block.
+    big = 1 << 62
+    ovf = [np.array([big, -3], dtype=np.int64), np.array([big, 5], dtype=np.int64),
+           np.array([big, 7], dtype=np.int64)]
+    cases.append({"deltas": [d.tolist() for d in ovf],
+                  "mean": trimmed_mean_int(ovf).tolist()})   # column 0 wraps
     v["trimmed_mean"] = cases
 
     # --- delta_hash over canonical int64 bytes --------------------------------

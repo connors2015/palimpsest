@@ -73,7 +73,11 @@ pub fn trimmed_mean(deltas: &[Vec<i64>], trim: f64) -> Vec<i64> {
             col[j] = d[i];
         }
         col.sort_unstable();
-        let sum: i64 = col[lo..hi].iter().sum();
+        // numpy sums with dtype=int64, which WRAPS on overflow (two's
+        // complement). Mirror it with wrapping_add so a crafted block of
+        // near-max deltas produces the identical result on every node instead
+        // of panicking a debug build or diverging — the reference is the spec.
+        let sum: i64 = col[lo..hi].iter().fold(0i64, |a, &b| a.wrapping_add(b));
         out[i] = sum.div_euclid(m);
     }
     out

@@ -223,11 +223,23 @@ impl TokenLedger {
 
     fn credit(&mut self, addr: &str, amount: u64) {
         if amount > 0 {
-            *self.balances.entry(addr.to_string()).or_insert(0) += amount;
+            // saturating guard: total emission is capped far below u64::MAX
+            // (SUNSET_HEIGHT × BASE_REWARD ≈ 5e16 ≪ 1.8e19), so a single balance
+            // can never actually reach the ceiling — this is a can't-happen
+            // defense that stays deterministic instead of panicking/wrapping if
+            // the emission constants ever change.
+            let bal = self.balances.entry(addr.to_string()).or_insert(0);
+            *bal = bal.saturating_add(amount);
         }
     }
 
     /// Mint + split the block reward; data share across the weighted registry.
+    ///
+    /// The three shares (miners / proposer / data) and the per-recipient splits
+    /// are floor divisions; the remainders (dust) are DELIBERATELY not minted, so
+    /// realized supply is always ≤ the emission schedule, never above it. This is
+    /// deterministic (identical on every node) and is the reason `supply()` runs a
+    /// hair under the nominal curve — a known, documented property, not a leak.
     pub fn apply_reward(&mut self, height: u64, miner_pubs: &[String],
                         proposer_pub: &str, legacy_data_addrs: &[String]) {
         let total = emission(height);
@@ -294,7 +306,7 @@ impl TokenLedger {
                     entry["status"] = json!("revoked");
                     entry["stake"] = json!(0);
                     let challenger = ch["challenger"].as_str().unwrap().to_string();
-                    self.credit(&challenger, stake + ch["stake"].as_u64().unwrap());
+                    self.credit(&challenger, stake.saturating_add(ch["stake"].as_u64().unwrap()));
                 } else {
                     let owner = entry["owner"].as_str().unwrap().to_string();
                     self.credit(&owner, ch["stake"].as_u64().unwrap());
