@@ -37,15 +37,13 @@ spec:
             - |
               set -e
               if [ -f /data/genesis-seed.bin ]; then exit 0; fi
-              mkdir -p ~/.ssh && cp /keys/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
-              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-              git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
+              # public repo: plain HTTPS clone, no deploy key needed
+              git clone --depth 1 https://github.com/connors2015/palimpsest.git /app
               cd /app
               pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
               pip install --no-cache-dir numpy pynacl
               python -m client.make_genesis --model small --seed 1337 --out /data/genesis-seed.bin
           volumeMounts:
-            - {name: deploy-key, mountPath: /keys, readOnly: true}
             - {name: data, mountPath: /data}
       containers:
         - name: seed
@@ -88,9 +86,6 @@ spec:
               # give the node time to flush its final snapshot on SIGTERM
               exec: {command: ["sleep", "5"]}
       terminationGracePeriodSeconds: 40
-      volumes:
-        - name: deploy-key
-          secret: {secretName: seed-deploy-key, defaultMode: 0400}
   volumeClaimTemplates:
     - metadata: {name: data}
       spec:
