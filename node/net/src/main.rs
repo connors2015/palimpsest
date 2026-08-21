@@ -152,6 +152,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .replay(dc.clone(), args.prune_depth)
         .expect("chain replay failed");
 
+    // Guarantee a current-format snapshot at the replayed head, so the NEXT
+    // boot is a fast-boot even for an idle watcher that never advances to a
+    // SNAPSHOT_EVERY height. Skips the write if disk already has one at head.
+    if !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
+        let head = tree.head.clone();
+        let height = tree.blocks[&head].height;
+        store.write_snapshot(&head, height, &tree.state[&head], tree.head_ledger());
+        info!(height, "wrote boot snapshot for fast-boot");
+    }
+
     // swarm with the full NAT stack: QUIC+TCP, Noise, relay client, AutoNAT,
     // DCUtR hole punching, optional relay server (seeds)
     let relay_server = args.relay_server;
