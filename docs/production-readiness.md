@@ -73,8 +73,11 @@ These 7 cannot be completed-and-validated in a single-machine coding
 environment; the readiness gate for each is the testnet, not a golden vector.
 - 108 delta scoring (held-out-shard loss) — needs off-chain model execution
 - 109 stake bonds / admission cost — economic-design + couples to 108's slash trigger
-- 111 DA routing (112 shard-recoverable replay) — needs live multi-node
-  availability testing; the DA *primitive* is done + golden-tested
+- ✅ 111/112 DA routing DONE at the storage layer: bodies are erasure-coded into
+  Merkle-committed shards on write, and replay/sync reconstruct from any K shards
+  instead of hard-stopping on a missing body (tested: recover from K, fail below
+  K; devnet converges with live dispersal). The multi-node piece — distributing
+  shards across peers + availability-sampling over gossip — is the testnet extension.
 - 114 Dtx cross-inclusion — needs the gossip/scoring layer
 - 115 chunked sparse aggregation — a perf optimization validated at real scale
 - 116 verified fee-bearing inference — needs off-chain serving + attestation
