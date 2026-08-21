@@ -45,7 +45,8 @@ mainnet. This maps every hardening task to its state and gates each phase.
 - 🧪 Capacity retarget controller (`core::capacity`) (117)
   - ☐ enforce the work quota in validate_block
 - 📐 Delta scoring: held-out-shard loss, commit-reveal committee, audit (108)
-- 📐 Stake bonds + slashing for score fraud / DA withholding (109)
+- ✅ Delta stake bond (admission cost) — lock/return done + golden-tested (109);
+  slashing on proven fraud couples to scoring (testnet)
 - 📐 Byzantine-robust aggregation at low miner counts (110)
 - 📐 Dtx cross-inclusion (anti-censorship) (114)
 - 📐 Verified fee-bearing inference + receipts (116)
@@ -71,8 +72,10 @@ scoring can't be exploited; keep mutating API endpoints token-gated/disabled.
 ## Remaining (all Phase-2/3 by nature — need live infra + off-chain compute)
 These 7 cannot be completed-and-validated in a single-machine coding
 environment; the readiness gate for each is the testnet, not a golden vector.
-- 108 delta scoring (held-out-shard loss) — needs off-chain model execution
-- 109 stake bonds / admission cost — economic-design + couples to 108's slash trigger
+- 108 delta scoring (held-out-shard loss) — needs off-chain model execution; a
+  self-reported score without the commit-reveal committee would be gameable, so
+  it genuinely gates on the testnet's off-chain verification
+- ✅ 109 delta stake bond DONE (see above); slashing gates on 108 (testnet)
 - ✅ 111/112 DA routing DONE at the storage layer: bodies are erasure-coded into
   Merkle-committed shards on write, and replay/sync reconstruct from any K shards
   instead of hard-stopping on a missing body (tested: recover from K, fail below
