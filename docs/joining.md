@@ -11,12 +11,14 @@ Your node dials the peer, **fetches the genesis from it, and verifies it against
 the published id** (so a bad peer can't seed you a wrong chain), then syncs. No
 genesis file to download, no seed to reproduce.
 
-> Launch parameters (filled in by the network operator):
+> Live devnet parameters:
 >
 > | | value |
 > |---|---|
-> | bootstrap peer | `/ip4/<SEED_IP>/udp/9800/quic-v1` |
-> | genesis id | `<PUBLISHED_GENESIS_HASH>` |
+> | bootstrap peer | `/ip4/169.58.211.248/udp/9800/quic-v1` |
+> | genesis id | `30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28` |
+> | model | 85.4M-param GPT, from-scratch genesis (seed 1337) |
+> | public API | `http://169.58.211.248:8080/status` |
 
 ## Run a node (watch + sync)
 
@@ -31,8 +33,8 @@ head -c32 /dev/urandom | xxd -p -c64 > ~/.palimpsest.key && chmod 600 ~/.palimps
 target/release/palimpsest-node \
   --data-dir ~/.palimpsest \
   --key-file ~/.palimpsest.key \
-  --genesis-hash <PUBLISHED_GENESIS_HASH> \
-  --peers /ip4/<SEED_IP>/udp/9800/quic-v1 \
+  --genesis-hash 30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28 \
+  --peers /ip4/169.58.211.248/udp/9800/quic-v1 \
   --api-port 8090
 ```
 

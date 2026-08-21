@@ -45,11 +45,12 @@ genesis from that peer, verifies it against the published id, and syncs:
 cd node && cargo build --release
 target/release/palimpsest-node --data-dir ~/.palimpsest \
   --wallet ~/.palimpsest/wallet.json \
-  --peers /ip4/<SEED_IP>/udp/9800/quic-v1 --genesis-hash <PUBLISHED_GENESIS_ID>
+  --peers /ip4/169.58.211.248/udp/9800/quic-v1 \
+  --genesis-hash 30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28
 ```
 
-`<SEED_IP>` and `<PUBLISHED_GENESIS_ID>` are published by the network at launch —
-see **[docs/joining.md](docs/joining.md)**. Make a wallet first with
+Those are the **live devnet** values (bootstrap peer + genesis id); the current
+list is always in **[docs/joining.md](docs/joining.md)**. Make a wallet first with
 `python -m client.wallet new` (that file is your on-chain identity *and* your
 balance). Your node now serves a dashboard + API at `http://localhost:8090`.
 
