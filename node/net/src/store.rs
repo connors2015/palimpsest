@@ -13,6 +13,7 @@
 
 use crate::proto::{Payload, StoredBlock};
 use palimpsest_core::blocktree::BlockTree;
+use palimpsest_core::token::TokenLedger;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -20,6 +21,9 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 pub const SNAPSHOT_EVERY: u64 = 25;
+
+/// (tree, block-index for serving, in-memory payload cache for recent blocks)
+type Rebuilt = (BlockTree, HashMap<String, StoredBlock>, HashMap<String, Payload>);
 
 pub struct Store {
     dir: PathBuf,
@@ -86,37 +90,127 @@ impl Store {
     }
 
     // ---- snapshots -------------------------------------------------------
-    pub fn write_snapshot(&self, block_hash: &str, height: u64, state: &[i64]) {
-        let _ = fs::write(self.dir.join("snapshot.bin"),
-                          palimpsest_core::int64_bytes(state));
-        let _ = fs::write(self.dir.join("snapshot.json"),
-                          serde_json::json!({"hash": block_hash, "height": height})
-                              .to_string());
+    /// Checkpoint the full head state AND ledger, written atomically (temp +
+    /// rename) so a crash mid-write can't leave a torn snapshot the fast path
+    /// would trust. The state goes to a binary blob; hash/height/ledger to JSON.
+    pub fn write_snapshot(&self, block_hash: &str, height: u64, state: &[i64],
+                          ledger: &TokenLedger) {
+        let bin_tmp = self.dir.join("snapshot.bin.tmp");
+        if fs::write(&bin_tmp, palimpsest_core::int64_bytes(state)).is_err() {
+            return;
+        }
+        let _ = fs::rename(&bin_tmp, self.dir.join("snapshot.bin"));
+        let meta = serde_json::json!({"hash": block_hash, "height": height,
+                                      "ledger": ledger.to_value()});
+        let json_tmp = self.dir.join("snapshot.json.tmp");
+        if fs::write(&json_tmp, meta.to_string()).is_ok() {
+            let _ = fs::rename(&json_tmp, self.dir.join("snapshot.json"));
+        }
     }
 
-    pub fn read_snapshot(&self) -> Option<(String, u64, Vec<i64>)> {
+    pub fn read_snapshot(&self) -> Option<(String, u64, Vec<i64>, TokenLedger)> {
         let meta: serde_json::Value = serde_json::from_slice(
             &fs::read(self.dir.join("snapshot.json")).ok()?).ok()?;
         let raw = fs::read(self.dir.join("snapshot.bin")).ok()?;
         let state = raw.chunks_exact(8)
             .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
-        Some((meta["hash"].as_str()?.to_string(), meta["height"].as_u64()?, state))
+        let ledger = TokenLedger::from_value(&meta["ledger"]);
+        Some((meta["hash"].as_str()?.to_string(), meta["height"].as_u64()?, state, ledger))
     }
 
-    /// Rebuild the tree + payload/block indices from disk. Returns
-    /// (tree, blocks index, in-memory payload cache for recent blocks).
+    /// Rebuild the tree + indices from disk. Tries FAST-BOOT from the newest
+    /// snapshot (trust the checkpointed state/ledger, validate only the blocks
+    /// after it); any problem falls back to full validated replay from genesis.
     pub fn replay(&self, data_contributor: Option<String>, prune_depth: u64)
-        -> Option<(BlockTree, HashMap<String, StoredBlock>, HashMap<String, Payload>)>
+        -> Option<Rebuilt>
     {
         let genesis = self.read_genesis()?;
-        let mut tree = BlockTree::new(genesis, data_contributor);
-        tree.prune_depth = Some(prune_depth);
         let blocks = self.read_blocks();
+        if let Some((h, height, state, ledger)) = self.read_snapshot() {
+            if let Some(r) = self.fast_replay(&genesis, &blocks, &data_contributor,
+                                              prune_depth, &h, height, state, ledger) {
+                return Some(r);
+            }
+            warn!("fast-boot unusable — falling back to full validated replay");
+        }
+        self.full_replay(genesis, &blocks, data_contributor, prune_depth)
+    }
+
+    /// Fast path: seed the tree with the snapshot's TRUSTED state+ledger at its
+    /// block, cheaply index all headers (no payloads, no trimmed-mean), then run
+    /// full validation forward from the snapshot only. Returns None (→ fallback)
+    /// if the snapshot block isn't in the log or nothing validates past it.
+    #[allow(clippy::too_many_arguments)]
+    fn fast_replay(&self, genesis: &[i64], blocks: &[StoredBlock],
+                   dc: &Option<String>, prune_depth: u64, snap_hash: &str,
+                   snap_h: u64, snap_state: Vec<i64>, snap_ledger: TokenLedger)
+        -> Option<Rebuilt>
+    {
+        let mut tree = BlockTree::new(genesis.to_vec(), dc.clone());
+        tree.prune_depth = Some(prune_depth);
+
+        // 1. headers + cum_work for every block up to the snapshot height, in
+        //    height order so parents precede children (cheap — headers only).
+        let mut sorted: Vec<&StoredBlock> = blocks.iter().collect();
+        sorted.sort_by_key(|b| b.header.height);
+        for sb in &sorted {
+            if sb.header.height > snap_h {
+                break;
+            }
+            let hdr = sb.header.to_core();
+            if let Some(pw) = tree.cum_work.get(&hdr.prev_hash).copied() {
+                let h = sb.hash();
+                tree.blocks.insert(h.clone(), hdr.clone());
+                tree.cum_work.insert(h, pw + hdr.work.max(1));
+            }
+        }
+        if !tree.blocks.contains_key(snap_hash) {
+            return None; // snapshot block not on disk — can't trust it
+        }
+        // 2. seed the checkpointed state + ledger at the snapshot block
+        tree.state.insert(snap_hash.to_string(), snap_state);
+        tree.ledger.insert(snap_hash.to_string(), snap_ledger);
+        tree.head = snap_hash.to_string();
+
+        // 3. index every stored block so we can still serve old ones; validate
+        //    FORWARD only the blocks after the snapshot (add_block validates
+        //    fully + runs fork choice, reconstructing their state/ledger).
+        let mut index: HashMap<String, StoredBlock> =
+            blocks.iter().map(|b| (b.hash(), b.clone())).collect();
+        let mut cache = HashMap::new();
+        let mut validated = 0u64;
+        for sb in &sorted {
+            if sb.header.height <= snap_h
+                || !tree.state.contains_key(&sb.header.prev_hash) {
+                continue;
+            }
+            let mut payloads = HashMap::new();
+            for wt in &sb.txs {
+                if let Some(t) = wt.to_core() {
+                    if let Some(p) = self.get_payload(&t.txid()) {
+                        payloads.insert(t.txid(), p);
+                    }
+                }
+            }
+            let Some(block) = sb.to_core(&payloads) else { continue };
+            if tree.add_block(block).is_ok() {
+                for (txid, p) in payloads { cache.insert(txid, p); }
+                validated += 1;
+            }
+        }
+        index.retain(|_, sb| sb.header.height <= tree.blocks[&tree.head].height);
+        info!(from = snap_h, to = tree.blocks[&tree.head].height,
+              validated, "FAST-BOOT from snapshot");
+        Some((tree, index, cache))
+    }
+
+    fn full_replay(&self, genesis: Vec<i64>, blocks: &[StoredBlock],
+                   dc: Option<String>, prune_depth: u64) -> Option<Rebuilt> {
+        let mut tree = BlockTree::new(genesis, dc);
+        tree.prune_depth = Some(prune_depth);
         let mut index = HashMap::new();
         let mut cache = HashMap::new();
-        let snap = self.read_snapshot();
-        for sb in &blocks {
-            // gather this block's payloads from disk
+        for sb in blocks {
             let mut payloads = HashMap::new();
             for wt in &sb.txs {
                 let Some(t) = wt.to_core() else { continue };
@@ -125,33 +219,22 @@ impl Store {
                 }
             }
             let Some(block) = sb.to_core(&payloads) else {
-                warn!(hash = %sb.hash(), "block on disk missing payloads — stopping replay here");
+                warn!(hash = %sb.hash(), "block missing payloads — stopping replay");
                 break;
             };
             match tree.add_block(block) {
                 Ok(_) => {
-                    for (txid, p) in payloads {
-                        cache.insert(txid, p);
-                    }
+                    for (txid, p) in payloads { cache.insert(txid, p); }
                     index.insert(sb.hash(), sb.clone());
                 }
                 Err(e) => {
-                    warn!(hash = %sb.hash(), err = %e.0, "invalid block on disk — stopping replay");
+                    warn!(hash = %sb.hash(), err = %e.0, "invalid block — stopping replay");
                     break;
                 }
             }
         }
-        if let Some((h, height, _)) = snap {
-            // snapshot is an integrity cross-check on replay (full validated
-            // replay is authoritative; a mismatch means disk corruption)
-            if let Some(hdr) = tree.blocks.get(&h) {
-                if hdr.height != height {
-                    warn!("snapshot metadata disagrees with replay — ignored");
-                }
-            }
-        }
         info!(height = tree.blocks[&tree.head].height, blocks = index.len(),
-              "replayed chain from disk");
+              "full validated replay from genesis");
         Some((tree, index, cache))
     }
 }

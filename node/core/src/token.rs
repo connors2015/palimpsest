@@ -388,4 +388,31 @@ impl TokenLedger {
     pub fn supply(&self) -> u64 {
         self.balances.values().sum()
     }
+
+    /// Serialize the full ledger for a snapshot (fast-boot). Structural, not the
+    /// hashed root form — this round-trips the state itself.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "balances": self.balances, "nonces": self.nonces,
+            "registry": self.registry, "challenges": self.challenges,
+        })
+    }
+
+    /// Reconstruct a ledger from a snapshot value (inverse of to_value).
+    pub fn from_value(v: &serde_json::Value) -> Self {
+        let mut led = TokenLedger::new();
+        if let Some(m) = v["balances"].as_object() {
+            for (k, x) in m { led.balances.insert(k.clone(), x.as_u64().unwrap_or(0)); }
+        }
+        if let Some(m) = v["nonces"].as_object() {
+            for (k, x) in m { led.nonces.insert(k.clone(), x.as_u64().unwrap_or(0)); }
+        }
+        if let Some(m) = v["registry"].as_object() {
+            for (k, x) in m { led.registry.insert(k.clone(), x.clone()); }
+        }
+        if let Some(m) = v["challenges"].as_object() {
+            for (k, x) in m { led.challenges.insert(k.clone(), x.clone()); }
+        }
+        led
+    }
 }

@@ -376,7 +376,8 @@ impl Node {
         }
         if h % SNAPSHOT_EVERY == 0 {
             self.store.write_snapshot(&self.tree.head, h,
-                                      &self.tree.state[&self.tree.head]);
+                                      &self.tree.state[&self.tree.head],
+                                      self.tree.head_ledger());
         }
     }
 
@@ -829,7 +830,8 @@ pub async fn run(
 
     // final report + snapshot
     let h = node.head_height();
-    node.store.write_snapshot(&node.tree.head, h, &node.tree.state[&node.tree.head]);
+    node.store.write_snapshot(&node.tree.head, h,
+                              &node.tree.state[&node.tree.head], node.tree.head_ledger());
     let mut lineage = Vec::new();
     let mut cur = node.tree.head.clone();
     while cur != node.tree.genesis_hash {
