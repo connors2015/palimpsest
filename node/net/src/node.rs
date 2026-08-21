@@ -83,8 +83,11 @@ mod mempool_bounds_tests {
 #[derive(Clone, Default)]
 pub struct BigJsonCodec;
 
-const SYNC_REQ_MAX: u64 = 16 * 1024 * 1024;
-const SYNC_RESP_MAX: u64 = 512 * 1024 * 1024;
+// A sync REQUEST is two integers — cap its read tiny. A RESPONSE is bounded by
+// the serve-side byte budget (~48MB); 96MB leaves headroom for JSON/base64
+// overhead while capping the allocation a peer can force from 512MB.
+const SYNC_REQ_MAX: u64 = 64 * 1024;
+const SYNC_RESP_MAX: u64 = 96 * 1024 * 1024;
 
 #[async_trait::async_trait]
 impl request_response::Codec for BigJsonCodec {
@@ -150,9 +153,25 @@ pub fn behaviour(
         .validation_mode(gossipsub::ValidationMode::Permissive)
         .build()
         .unwrap();
+    // Peer scoring: track delivery/validity per peer and graylist the worst.
+    // This is the real defense against a peer flooding max-size messages now
+    // that size alone doesn't bound abuse. Conservative params (positive decay
+    // so scores recover) with library-default thresholds so honest peers aren't
+    // punished; if params are ever invalid we log and run without scoring rather
+    // than refusing to start.
+    let mut gossipsub = gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(key.clone()), gs_cfg).unwrap();
+    let score_params = gossipsub::PeerScoreParams {
+        decay_interval: Duration::from_secs(12),
+        decay_to_zero: 0.01,
+        ..Default::default()
+    };
+    if let Err(e) = gossipsub.with_peer_score(
+        score_params, gossipsub::PeerScoreThresholds::default()) {
+        warn!("gossipsub peer scoring disabled: {e}");
+    }
     Behaviour {
-        gossipsub: gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(key.clone()), gs_cfg).unwrap(),
+        gossipsub,
         identify: identify::Behaviour::new(identify::Config::new(
             "/palimpsest/1.0.0".into(), key.public())),
         sync: request_response::Behaviour::with_codec(
