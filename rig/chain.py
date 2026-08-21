@@ -45,6 +45,14 @@ def trimmed_mean_int(deltas_int: list[np.ndarray], trim: float = 0.2) -> np.ndar
     arr = np.sort(arr, axis=0)
     k = arr.shape[0]
     lo = int(np.floor(k * trim))
+    # Byzantine robustness at LOW miner counts: with the plain 0.2 fraction, k in
+    # {3,4} trims nothing and a single adversarial delta is averaged straight in.
+    # Once there are >= 3 deltas, always drop >= 1 from each end so a lone
+    # outlier can never dominate. (k < 3 cannot be made robust — you need >= 3
+    # participants to outvote one; that regime is mitigated by launching
+    # invite-only and treating < 3-miner blocks as untrusted.)
+    if k >= 3:
+        lo = max(1, lo)
     hi = k - lo
     core = arr[lo:hi] if hi > lo else arr
     return np.floor_divide(core.sum(axis=0, dtype=np.int64), core.shape[0])

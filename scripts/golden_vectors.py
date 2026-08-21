@@ -75,6 +75,13 @@ def main():
            np.array([big, 7], dtype=np.int64)]
     cases.append({"deltas": [d.tolist() for d in ovf],
                   "mean": trimmed_mean_int(ovf).tolist()})   # column 0 wraps
+    # LOW-COUNT ROBUSTNESS: 3 deltas, one a large adversarial outlier per coord.
+    # The >=1 trim (k>=3) drops it, leaving the honest middle — a plain mean
+    # would have been dragged toward the outlier.
+    adv = [np.array([10, 10], dtype=np.int64), np.array([12, 11], dtype=np.int64),
+           np.array([100000, -100000], dtype=np.int64)]
+    cases.append({"deltas": [d.tolist() for d in adv],
+                  "mean": trimmed_mean_int(adv).tolist()})
     v["trimmed_mean"] = cases
 
     # --- delta_hash over canonical int64 bytes --------------------------------

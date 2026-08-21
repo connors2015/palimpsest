@@ -77,7 +77,13 @@ pub fn trimmed_mean(deltas: &[Vec<i64>], trim: f64) -> Vec<i64> {
     let k = deltas.len();
     assert!(k > 0);
     let n = deltas[0].len();
-    let lo = (k as f64 * trim).floor() as usize;
+    let mut lo = (k as f64 * trim).floor() as usize;
+    // Byzantine robustness at low miner counts: once k >= 3, always drop >= 1
+    // from each end so a lone adversarial delta can't be averaged straight in
+    // (matches rig/chain.py). k < 3 cannot be made robust.
+    if k >= 3 {
+        lo = lo.max(1);
+    }
     let hi = k - lo;
     let (lo, hi) = if hi > lo { (lo, hi) } else { (0, k) };
     let m = (hi - lo) as i64;
