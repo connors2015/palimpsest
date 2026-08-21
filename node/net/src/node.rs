@@ -17,12 +17,56 @@ use libp2p::{
 };
 use palimpsest_core::{self as core, blocktree::BlockTree, token::AccountTx};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub const INCLUDE_K: usize = 8;
+
+// --- mempool / cache bounds (DoS hardening) --------------------------------
+// Every pool and dedup set is size-capped with eviction, and deltas/txs are
+// admitted only within a narrow, includable window around the head — otherwise
+// an unauthenticated peer can mint unlimited well-formed txs and grow memory +
+// disk without bound. A delta is includable only when base_height == head
+// height (validate_block requires it), so anything materially older can never
+// be used and anything far in the future is spam.
+const DELTA_STALE_SLACK: u64 = 2; // tolerate this many blocks of head lag
+const DELTA_FUTURE_WINDOW: u64 = 4; // ...and this much look-ahead
+const MAX_DELTA_POOL: usize = 512;
+const MAX_ACCOUNT_POOL: usize = 4096;
+const MAX_PENDING: usize = 256;
+const MAX_SEEN: usize = 100_000;
+
+/// A delta is worth holding only if its base_height sits in the includable
+/// window around the current head. Pure + total so it can be unit-tested.
+pub fn delta_in_window(base_height: u64, head_height: u64) -> bool {
+    base_height + DELTA_STALE_SLACK >= head_height
+        && base_height <= head_height + DELTA_FUTURE_WINDOW
+}
+
+#[cfg(test)]
+mod mempool_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn delta_window_admits_near_head_rejects_far() {
+        let head = 100;
+        assert!(delta_in_window(head, head), "at-head delta is includable");
+        assert!(delta_in_window(head - DELTA_STALE_SLACK, head), "within slack kept");
+        assert!(!delta_in_window(head - DELTA_STALE_SLACK - 1, head), "too stale dropped");
+        assert!(delta_in_window(head + DELTA_FUTURE_WINDOW, head), "near-future kept");
+        assert!(!delta_in_window(head + DELTA_FUTURE_WINDOW + 1, head), "far-future dropped");
+    }
+
+    #[test]
+    fn delta_window_safe_at_genesis() {
+        // head 0 must not underflow / panic
+        assert!(delta_in_window(0, 0));
+        assert!(delta_in_window(3, 0));
+        assert!(!delta_in_window(0 + DELTA_FUTURE_WINDOW + 1, 0));
+    }
+}
 
 /// Length-prefixed JSON sync codec with explicit large limits — the stock JSON
 /// codec caps responses ~10MB, but an 86M-model compressed payload is ~18MB.
@@ -140,6 +184,8 @@ pub struct Node {
     pub account_pool: HashMap<String, AccountTx>,
     pub pending: HashMap<String, (StoredBlock, PeerId)>, // blocks awaiting payloads
     pub seen: HashSet<String>,
+    /// insertion order for `seen`, so it can be bounded as a recency ring
+    pub seen_order: VecDeque<String>,
     pub cfg: NodeConfig,
     pub topic: gossipsub::IdentTopic,
     pub bridge_tx: mpsc::Sender<ToBridge>,
@@ -168,6 +214,86 @@ impl Node {
         }
     }
 
+    /// Record a txid as seen, bounding the set as an insertion-ordered ring so a
+    /// peer streaming unique txids can't grow it without limit.
+    fn mark_seen(&mut self, txid: String) {
+        if self.seen.insert(txid.clone()) {
+            self.seen_order.push_back(txid);
+            while self.seen_order.len() > MAX_SEEN {
+                if let Some(old) = self.seen_order.pop_front() {
+                    self.seen.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// Drop a never-included delta from the mempool AND reclaim its disk payload
+    /// (it was written on accept; if it's never mined it is pure garbage).
+    fn drop_pool_delta(&mut self, txid: &str) {
+        self.delta_pool.remove(txid);
+        self.payloads.remove(txid);
+        self.store.remove_payload(txid);
+    }
+
+    /// Evict stale/over-cap deltas. Stale = outside the includable window (can
+    /// never be mined); over-cap = keep the freshest MAX_DELTA_POOL by height.
+    fn evict_delta_pool(&mut self) {
+        let head = self.head_height();
+        let stale: Vec<String> = self.delta_pool.iter()
+            .filter(|(_, t)| !delta_in_window(t.base_height, head))
+            .map(|(id, _)| id.clone()).collect();
+        for id in stale {
+            self.drop_pool_delta(&id);
+        }
+        if self.delta_pool.len() > MAX_DELTA_POOL {
+            let mut by_h: Vec<(String, u64)> = self.delta_pool.iter()
+                .map(|(id, t)| (id.clone(), t.base_height)).collect();
+            by_h.sort_by_key(|(_, h)| *h);                 // stalest first
+            let excess = self.delta_pool.len() - MAX_DELTA_POOL;
+            for (id, _) in by_h.into_iter().take(excess) {
+                self.drop_pool_delta(&id);
+            }
+        }
+    }
+
+    /// Evict account txs whose nonce is now below the sender's ledger nonce
+    /// (can never apply), then cap by dropping the most speculative (highest
+    /// nonce) first.
+    fn evict_account_pool(&mut self) {
+        use palimpsest_core::token::address;
+        let stale: Vec<String> = {
+            let led = self.tree.head_ledger();
+            self.account_pool.iter()
+                .filter(|(_, t)| t.nonce()
+                        < led.nonces.get(&address(t.sender_pub())).copied().unwrap_or(0))
+                .map(|(id, _)| id.clone()).collect()
+        };
+        for id in stale {
+            self.account_pool.remove(&id);
+        }
+        if self.account_pool.len() > MAX_ACCOUNT_POOL {
+            let mut by_n: Vec<(String, u64)> = self.account_pool.iter()
+                .map(|(id, t)| (id.clone(), t.nonce())).collect();
+            by_n.sort_by_key(|(_, n)| std::cmp::Reverse(*n));  // most future first
+            let excess = self.account_pool.len() - MAX_ACCOUNT_POOL;
+            for (id, _) in by_n.into_iter().take(excess) {
+                self.account_pool.remove(&id);
+            }
+        }
+    }
+
+    /// Queue an orphan/missing-payload block, bounded: when full, evict the
+    /// lowest-height pending block (least likely to ever become live).
+    fn queue_pending(&mut self, bh: String, sb: StoredBlock, peer: PeerId) {
+        if self.pending.len() >= MAX_PENDING && !self.pending.contains_key(&bh) {
+            if let Some(drop) = self.pending.iter()
+                .min_by_key(|(_, (s, _))| s.header.height).map(|(h, _)| h.clone()) {
+                self.pending.remove(&drop);
+            }
+        }
+        self.pending.insert(bh, (sb, peer));
+    }
+
     // ---- delta txs (from our bridge or from gossip) ----------------------
     fn accept_delta(&mut self, tx: core::BackpropTx, payload: Payload) -> bool {
         let txid = tx.txid();
@@ -179,20 +305,33 @@ impl Node {
             warn!("delta payload hash mismatch from {}", &tx.miner[..8]);
             return false;
         }
-        self.seen.insert(txid.clone());
+        // height gate: only admit deltas that can plausibly be mined onto head
+        if !delta_in_window(tx.base_height, self.head_height()) {
+            return false;
+        }
+        self.mark_seen(txid.clone());
         self.store.put_payload(&txid, &payload);
         self.payloads.insert(txid.clone(), payload);
         self.delta_pool.insert(txid, tx);
+        self.evict_delta_pool();
         true
     }
 
     fn accept_account_tx(&mut self, tx: AccountTx) -> Option<String> {
+        use palimpsest_core::token::address;
         let txid = tx.txid();
         if self.seen.contains(&txid) || !tx.verify() {
             return None;
         }
-        self.seen.insert(txid.clone());
+        // nonce gate: a tx below the sender's current nonce can never apply
+        let cur = self.tree.head_ledger().nonces
+            .get(&address(tx.sender_pub())).copied().unwrap_or(0);
+        if tx.nonce() < cur {
+            return None;
+        }
+        self.mark_seen(txid.clone());
         self.account_pool.insert(txid.clone(), tx);
+        self.evict_account_pool();
         Some(txid)
     }
 
@@ -221,7 +360,8 @@ impl Node {
             .map(|t| self.payloads[&t.txid()].dense().unwrap()).collect();
         let mean = core::trimmed_mean(&deltas, 0.2);
         let parent_w = &self.tree.state[&head];
-        let w: Vec<i64> = parent_w.iter().zip(&mean).map(|(a, b)| a + b).collect();
+        // wrapping_add mirrors numpy int64 (matches validate_block exactly)
+        let w: Vec<i64> = parent_w.iter().zip(&mean).map(|(a, b)| a.wrapping_add(*b)).collect();
         // account lanes: dry-run in the validator's exact order
         let mut scratch = self.tree.ledger[&head].clone();
         scratch.resolve_expired_challenges(hh + 1);
@@ -297,7 +437,7 @@ impl Node {
                     count: 32,
                 };
                 swarm.behaviour_mut().sync.send_request(&peer, req);
-                self.pending.insert(bh, (sb, peer));
+                self.queue_pending(bh, sb, peer);
             }
             return false;
         };
@@ -307,13 +447,17 @@ impl Node {
                 let _ = self.store.append_block(&sb);
                 for t in &sb.txs {
                     if let Some(tc) = t.to_core() {
-                        self.delta_pool.remove(&tc.txid());
+                        let id = tc.txid();
+                        self.delta_pool.remove(&id);
+                        // the payload is now persisted inside the block (on disk);
+                        // drop the in-memory copy — sync/replay read it from disk.
+                        self.payloads.remove(&id);
                     }
                 }
                 for v in sb.transfers.iter().chain(sb.data_txs.iter()) {
                     if let Some(t) = account_tx_from_json(v) {
                         self.account_pool.remove(&t.txid());
-                        self.seen.insert(t.txid());
+                        self.mark_seen(t.txid());
                     }
                 }
                 self.blocks_full.insert(bh.clone(), sb);
@@ -330,7 +474,7 @@ impl Node {
                             count: 64,
                         };
                         swarm.behaviour_mut().sync.send_request(&peer, req);
-                        self.pending.insert(bh, (sb, peer));
+                        self.queue_pending(bh, sb, peer);
                     }
                 } else {
                     warn!("invalid block h{}: {}", sb.header.height, e.0);
@@ -378,6 +522,15 @@ impl Node {
             self.store.write_snapshot(&self.tree.head, h,
                                       &self.tree.state[&self.tree.head],
                                       self.tree.head_ledger());
+        }
+        // the head moved: prune mempools + pending against it
+        self.evict_delta_pool();
+        self.evict_account_pool();
+        let drop_pending: Vec<String> = self.pending.iter()
+            .filter(|(_, (s, _))| s.header.height + DELTA_STALE_SLACK < h)
+            .map(|(k, _)| k.clone()).collect();
+        for k in drop_pending {
+            self.pending.remove(&k);
         }
     }
 

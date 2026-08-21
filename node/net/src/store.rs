@@ -75,6 +75,12 @@ impl Store {
         serde_json::from_slice(&raw).ok()
     }
 
+    /// Delete a payload that will never be part of a block (a mempool delta
+    /// evicted before inclusion) — reclaims disk from spammed/never-mined deltas.
+    pub fn remove_payload(&self, txid: &str) {
+        let _ = fs::remove_file(self.dir.join("payloads").join(format!("{txid}.json")));
+    }
+
     // ---- block log -------------------------------------------------------
     pub fn append_block(&self, b: &StoredBlock) -> std::io::Result<()> {
         let mut f = fs::OpenOptions::new().create(true).append(true)

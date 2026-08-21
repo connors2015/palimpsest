@@ -210,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         account_pool: Default::default(),
         pending: Default::default(),
         seen: Default::default(),
+        seen_order: Default::default(),
         cfg: node::NodeConfig {
             produce: args.produce,
             interval: args.interval,
