@@ -36,12 +36,28 @@ fn err(msg: &str) -> ValidationError {
 pub fn validate_block(
     block: &Block,
     parent_w: &[i64],
+    parent_height: u64,
     parent_ledger: &TokenLedger,
     data_contributor: Option<&str>,
     recent_proposers: &HashSet<String>,
 ) -> Result<(Vec<i64>, TokenLedger), ValidationError> {
     let h = &block.header;
-    // 1. every delta tx well-formed and signed; DA body matches its hash
+    let dim = parent_w.len();
+    // 0. STRUCTURAL invariants binding the header to its parent and body.
+    //    height must advance by exactly one — otherwise a miner could pin a low
+    //    height on every block and mint the height-keyed reward forever (halving
+    //    /sunset are only meaningful if height is monotone), and a height-0
+    //    non-genesis block would underflow `h.height - 1` below.
+    if h.height != parent_height + 1 {
+        return Err(err("height must be parent height + 1"));
+    }
+    //    n_txs must match the real tx count (it is committed in the block hash).
+    if h.n_txs as usize != block.txs.len() {
+        return Err(err("n_txs does not match tx count"));
+    }
+    // 1. every delta tx well-formed and signed; its DA body must have the model
+    //    dimension (so aggregation can't be made to panic/diverge by a short or
+    //    long body) and match its hash.
     for tx in &block.txs {
         if !tx.verify() {
             return Err(err("bad signature on tx"));
@@ -53,6 +69,9 @@ pub fn validate_block(
             .bodies
             .get(&tx.da_pointer)
             .ok_or_else(|| err("missing DA body"))?;
+        if body.len() != dim {
+            return Err(err("delta body length != model dimension"));
+        }
         if delta_hash(&int64_bytes(body)) != tx.delta_hash {
             return Err(err("delta body hash mismatch"));
         }
@@ -190,9 +209,11 @@ impl BlockTree {
             .clone();
         let parent_led = self.ledger[&parent].clone();
         let jurors = self.recent_proposers(&parent);
+        let parent_height = self.blocks[&parent].height;
         let (w, led) = validate_block(
             &block,
             &parent_w,
+            parent_height,
             &parent_led,
             self.data_contributor.as_deref(),
             &jurors,

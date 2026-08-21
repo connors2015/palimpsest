@@ -105,7 +105,7 @@ def apply_ledger(parent_ledger: TokenLedger, block: Block,
     return led
 
 
-def validate_block(block: Block, parent_w_int: np.ndarray,
+def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
                    parent_ledger: TokenLedger | None = None,
                    data_contributor: str | None = None,
                    recent_proposers: set[str] = frozenset()):
@@ -116,7 +116,21 @@ def validate_block(block: Block, parent_w_int: np.ndarray,
     `parent_ledger=None` skips ledger validation (legacy callers only; the live
     protocol always validates the ledger)."""
     h = block.header
-    # 1. every tx is well-formed and correctly signed
+    dim = int(parent_w_int.shape[0])
+    # 0. STRUCTURAL invariants that bind the header to its parent and body.
+    #    height must advance by exactly one — otherwise a miner could pin a low
+    #    height on every block and mint the height-keyed reward forever (the
+    #    halving/sunset are only meaningful if height is monotone), and a
+    #    height-0 non-genesis block would underflow h.height-1 below.
+    if h.height != parent_height + 1:
+        raise ValidationError("height must be parent height + 1")
+    #    n_txs must match the actual tx count (it is committed in the block hash;
+    #    a mismatch means the header misrepresents the block).
+    if h.n_txs != len(block.txs):
+        raise ValidationError("n_txs does not match tx count")
+    # 1. every tx is well-formed and correctly signed; its delta body must have
+    #    the model dimension so aggregation cannot be made to panic/diverge by a
+    #    short or long body (all bodies share `dim`, checked here before use).
     for tx in block.txs:
         if not tx.verify():
             raise ValidationError(f"bad signature on tx {tx.txid()[:8]}")
@@ -125,6 +139,8 @@ def validate_block(block: Block, parent_w_int: np.ndarray,
         body = block.bodies.get(tx.da_pointer)
         if body is None:
             raise ValidationError(f"missing DA body for {tx.da_pointer}")
+        if int(body.shape[0]) != dim:
+            raise ValidationError("delta body length != model dimension")
         if _sha(body.tobytes()) != tx.delta_hash:
             raise ValidationError("delta body hash mismatch (DA withholding/forgery)")
     # 2. tx-set root matches
@@ -188,8 +204,9 @@ class BlockTree:
         # do; legacy rev-1 blocks carry ledger_root="" and skip it)
         parent_led = self.ledger.get(parent) if block.header.ledger_root else None
         juror_pubs = self.recent_proposers(parent)
-        w, led = validate_block(block, self.state[parent], parent_led,
-                                self.data_contributor, juror_pubs)  # may raise
+        parent_height = self.blocks[parent].header.height
+        w, led = validate_block(block, self.state[parent], parent_height,
+                                parent_led, self.data_contributor, juror_pubs)  # may raise
         self.blocks[block.hash] = block
         self.state[block.hash] = w
         if led is not None:
