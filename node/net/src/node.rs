@@ -596,6 +596,8 @@ pub async fn run(
                                         .insert(propagation_source, now());
                                     let from = node.head_height()
                                         .min(height).saturating_sub(2);
+                                    info!(peer = %propagation_source, their_h = height,
+                                          from, "unknown head — requesting sync");
                                     let req = SyncRequest { from_height: from, count: 8 };
                                     swarm.behaviour_mut().sync
                                         .send_request(&propagation_source, req);
@@ -641,6 +643,8 @@ pub async fn run(
                                     }
                                 }
                             }
+                            info!(from = request.from_height, served = chain.len(),
+                                  "serving sync request");
                             let resp = SyncResponse {
                                 blocks: chain, payloads,
                                 head_height: node.head_height(),
@@ -649,6 +653,9 @@ pub async fn run(
                                 .send_response(channel, resp);
                         }
                         request_response::Message::Response { response, .. } => {
+                            info!(blocks = response.blocks.len(),
+                                  their_head = response.head_height,
+                                  "sync response received");
                             for (txid, p) in response.payloads {
                                 if !node.payloads.contains_key(&txid) {
                                     node.store.put_payload(&txid, &p);
