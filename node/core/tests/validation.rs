@@ -93,3 +93,97 @@ fn rejects_wrong_length_delta_body() {
     let e = tree.add_block(blk).unwrap_err();
     assert!(e.0.contains("delta body length"), "got: {}", e.0);
 }
+
+// --- data-challenge market: quorum + disinterested jurors (task 93) ---------
+
+use palimpsest_core::token::{
+    address, AccountTx, DataChallengeTx, DataSubmitTx, DataVoteTx, TokenLedger,
+};
+use std::collections::HashSet;
+
+fn signed(mut tx: AccountTx, key: &core::Key) -> AccountTx {
+    let sig = key.sign(&tx.signing_bytes());
+    match &mut tx {
+        AccountTx::Transfer(t) => t.sig = sig,
+        AccountTx::DataSubmit(t) => t.sig = sig,
+        AccountTx::DataChallenge(t) => t.sig = sig,
+        AccountTx::DataVote(t) => t.sig = sig,
+    }
+    tx
+}
+
+/// Fund an owner, register a staked entry, fund a challenger, open a challenge.
+/// Returns (ledger, owner, challenger, jurors, data_id, challenge_id).
+fn open_challenge() -> (TokenLedger, core::Key, core::Key, Vec<core::Key>, String, String) {
+    let owner = core::Key::from_seed([1u8; 32]);
+    let challenger = core::Key::from_seed([2u8; 32]);
+    let jurors: Vec<core::Key> = (10u8..13).map(|i| core::Key::from_seed([i; 32])).collect();
+    let mut led = TokenLedger::new();
+    // fund owner + challenger via block rewards
+    led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[]);
+    let sub = signed(AccountTx::DataSubmit(DataSubmitTx {
+        owner_pub: owner.pub_hex(), data_hash: "aa".repeat(32), size_bytes: 8,
+        media_type: "text".into(), stake: 1_000_000, nonce: 0, sig: vec![],
+    }), &owner);
+    assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
+    let data_id = sub.txid();
+    led.apply_reward(2, &[challenger.pub_hex()], &challenger.pub_hex(), &[]);
+    let ch = signed(AccountTx::DataChallenge(DataChallengeTx {
+        challenger_pub: challenger.pub_hex(), data_id: data_id.clone(), stake: 500_000,
+        reason: "validity".into(), nonce: 0, sig: vec![],
+    }), &challenger);
+    assert!(led.apply_data_tx(&ch, 2, &HashSet::new()));
+    let challenge_id = ch.txid();
+    (led, owner, challenger, jurors, data_id, challenge_id)
+}
+
+#[test]
+fn challenger_cannot_vote_on_own_challenge() {
+    let (mut led, _owner, challenger, _jurors, _data_id, challenge_id) = open_challenge();
+    let jset: HashSet<String> = [challenger.pub_hex()].into_iter().collect();
+    let vote = signed(AccountTx::DataVote(DataVoteTx {
+        voter_pub: challenger.pub_hex(), challenge_id, support: true, nonce: 1, sig: vec![],
+    }), &challenger);
+    // even though the challenger is a "recent proposer", they are an interested
+    // party and must be rejected as a juror.
+    assert!(!led.apply_data_tx(&vote, 3, &jset), "challenger self-vote must be rejected");
+}
+
+#[test]
+fn owner_cannot_vote_on_challenge_of_own_entry() {
+    let (mut led, owner, _challenger, _jurors, _data_id, challenge_id) = open_challenge();
+    let jset: HashSet<String> = [owner.pub_hex()].into_iter().collect();
+    let vote = signed(AccountTx::DataVote(DataVoteTx {
+        voter_pub: owner.pub_hex(), challenge_id, support: false, nonce: 1, sig: vec![],
+    }), &owner);
+    assert!(!led.apply_data_tx(&vote, 3, &jset), "owner defending own entry must be rejected");
+}
+
+#[test]
+fn challenge_below_quorum_is_rejected_and_refunds_owner() {
+    use palimpsest_core::token::CHALLENGE_QUORUM;
+    let (mut led, owner, challenger, jurors, data_id, challenge_id) = open_challenge();
+    let owner_addr = address(&owner.pub_hex());
+    let bal_before = led.balance(&owner_addr);
+    // only (QUORUM - 1) jurors uphold — below quorum
+    let jset: HashSet<String> = jurors.iter().map(|k| k.pub_hex()).collect();
+    for jk in jurors.iter().take(CHALLENGE_QUORUM - 1) {
+        let vote = signed(AccountTx::DataVote(DataVoteTx {
+            voter_pub: jk.pub_hex(), challenge_id: challenge_id.clone(), support: true,
+            nonce: 0, sig: vec![],
+        }), jk);
+        assert!(led.apply_data_tx(&vote, 3, &jset));
+    }
+    let chal_addr = address(&challenger.pub_hex());
+    let chal_before = led.balance(&chal_addr); // stake already escrowed out
+    led.resolve_expired_challenges(2 + palimpsest_core::token::CHALLENGE_WINDOW);
+    // below quorum => NOT upheld: entry stays active, and the challenger's stake
+    // is forfeited to the owner (lying/failed challenge costs).
+    assert_eq!(led.registry[&data_id]["status"].as_str(), Some("active"),
+               "sub-quorum challenge must not revoke the entry");
+    assert_eq!(led.balance(&owner_addr), bal_before + 500_000,
+               "owner must be refunded exactly the challenger's forfeited stake");
+    // the challenger seized nothing back — its escrowed stake is gone to the owner
+    assert_eq!(led.balance(&chal_addr), chal_before,
+               "rejected challenger recovers nothing");
+}

@@ -234,17 +234,23 @@ fn data_lane_matches_reference() {
         led.apply_reward(2, &[challenger.clone()], &challenger, &[]);
         let ch = data_tx_from("challenge", &case["challenge"]);
         assert!(led.apply_data_tx(&ch, 2, &HashSet::new()));
-        let vote = data_tx_from("vote", &case["vote"]);
-        let jurors: HashSet<String> = [owner].into_iter().collect();
-        assert!(led.apply_data_tx(&vote, 3, &jurors));
+        // CHALLENGE_QUORUM disinterested jurors vote to uphold
+        let votes_json = case["votes"].as_array().unwrap();
+        let votes: Vec<_> = votes_json.iter().map(|vj| data_tx_from("vote", vj)).collect();
+        let jurors: HashSet<String> = votes.iter()
+            .map(|v| v.sender_pub().to_string()).collect();
+        for vote in &votes {
+            assert!(led.apply_data_tx(vote, 3, &jurors), "quorum juror vote must apply");
+        }
         assert_eq!(led.root(), case["root_after_vote"].as_str().unwrap());
         led.resolve_expired_challenges(case["resolve_height"].as_u64().unwrap());
         assert_eq!(led.root(), case["root_after_resolve"].as_str().unwrap(),
                    "challenge resolution mismatch");
         assert_eq!(led.balance(&palimpsest_core::token::address(&challenger)),
                    case["challenger_balance_after"].as_u64().unwrap());
-        assert_eq!(data_root(&[sub, ch, vote]),
-                   case["data_root_of_three"].as_str().unwrap());
+        let mut all = vec![sub, ch];
+        all.extend(votes);
+        assert_eq!(data_root(&all), case["data_root_of_all"].as_str().unwrap());
     }
 }
 

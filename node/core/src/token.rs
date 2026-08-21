@@ -20,6 +20,9 @@ pub const SHARE_DATA: u64 = 2_000;
 pub const CHALLENGE_WINDOW: u64 = 20;
 pub const PROPOSER_LOOKBACK: usize = 32;
 pub const GENESIS_DATA_WEIGHT: u64 = 1_000_000;
+/// Minimum affirmative juror votes to uphold a challenge — one juror must never
+/// be able to seize an owner's stake; below quorum the challenge is rejected.
+pub const CHALLENGE_QUORUM: usize = 3;
 
 /// Wallet address: sha256 of the raw pubkey bytes, first 20 bytes, hex.
 pub fn address(pub_hex: &str) -> String {
@@ -280,9 +283,11 @@ impl TokenLedger {
                 continue;
             }
             let data_id = ch["data_id"].as_str().unwrap().to_string();
-            let upheld = ch["votes_for"].as_array().unwrap().len()
-                > ch["votes_against"].as_array().unwrap().len()
-                && !ch["votes_for"].as_array().unwrap().is_empty();
+            // QUORUM: upheld only with a strict majority AND at least
+            // CHALLENGE_QUORUM affirmative juror votes; below quorum → rejected.
+            let vf = ch["votes_for"].as_array().unwrap().len();
+            let va = ch["votes_against"].as_array().unwrap().len();
+            let upheld = vf >= CHALLENGE_QUORUM && vf > va;
             if let Some(entry) = self.registry.get_mut(&data_id) {
                 if upheld {
                     let stake = entry["stake"].as_u64().unwrap();
@@ -354,14 +359,25 @@ impl TokenLedger {
                 if !recent_proposers.contains(&t.voter_pub) {
                     return false;
                 }
-                let Some(ch) = self.challenges.get_mut(&t.challenge_id) else {
+                let Some(ch) = self.challenges.get(&t.challenge_id) else {
                     return false;
                 };
-                let voted = |k: &str| ch[k].as_array().unwrap()
-                    .iter().any(|v| v == src.as_str());
-                if voted("votes_for") || voted("votes_against") {
+                let voted = ch["votes_for"].as_array().unwrap().iter().any(|v| v == src.as_str())
+                    || ch["votes_against"].as_array().unwrap().iter().any(|v| v == src.as_str());
+                // DISINTERESTED JURORS ONLY: neither the challenger nor the data
+                // owner may vote on their own challenge — both are interested
+                // parties. Jurors are disinterested recent proposers.
+                let is_challenger = ch["challenger"].as_str() == Some(src.as_str());
+                let data_id = ch["data_id"].as_str().unwrap().to_string();
+                if voted || is_challenger {
                     return false;
                 }
+                if let Some(entry) = self.registry.get(&data_id) {
+                    if entry["owner"].as_str() == Some(src.as_str()) {
+                        return false;
+                    }
+                }
+                let ch = self.challenges.get_mut(&t.challenge_id).unwrap();
                 let k = if t.support { "votes_for" } else { "votes_against" };
                 let arr = ch[k].as_array_mut().unwrap();
                 arr.push(json!(src));

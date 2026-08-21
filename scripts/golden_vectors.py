@@ -165,11 +165,20 @@ def main():
                          stake=led2.balance(address(k2.pub)) // 4,
                          reason="validity", nonce=0).signed(k2)
     assert led2.apply_data_tx(ch, 2, set())
-    vote = DataVoteTx(voter_pub=key.pub, challenge_id=ch.txid(),
-                      support=True, nonce=1).signed(key)
-    assert led2.apply_data_tx(vote, 3, {key.pub})         # key proposed recently
+    # CHALLENGE_QUORUM (=3) DISINTERESTED jurors, each a recent proposer and
+    # neither the owner (key) nor the challenger (k2), all vote to uphold — so
+    # the quorum is met and the challenge is upheld (entry revoked, stake to
+    # challenger). A single vote would now be below quorum and REJECTED.
+    juror_keys = [Key.generate(b"golden-juror-%d" % i) for i in range(3)]
+    juror_pubs = {jk.pub for jk in juror_keys}
+    votes = []
+    for jk in juror_keys:
+        vt = DataVoteTx(voter_pub=jk.pub, challenge_id=ch.txid(),
+                        support=True, nonce=0).signed(jk)
+        assert led2.apply_data_tx(vt, 3, juror_pubs), "juror vote must apply"
+        votes.append(vt)
     root_after_vote = led2.root()
-    led2.resolve_expired_challenges(2 + CHALLENGE_WINDOW)  # upheld -> revoke
+    led2.resolve_expired_challenges(2 + CHALLENGE_WINDOW)  # quorum met -> upheld
     v["data_lane"] = [{
         "founder_pub": kf.pub,
         "root_genesis": root_genesis,
@@ -182,14 +191,14 @@ def main():
         "challenge": {"challenger_pub": ch.challenger_pub, "data_id": ch.data_id,
                       "stake": ch.stake, "reason": ch.reason, "nonce": ch.nonce,
                       "txid": ch.txid(), "sig_hex": ch.sig.hex()},
-        "vote": {"voter_pub": vote.voter_pub, "challenge_id": vote.challenge_id,
-                 "support": vote.support, "nonce": vote.nonce,
-                 "txid": vote.txid(), "sig_hex": vote.sig.hex()},
+        "votes": [{"voter_pub": vt.voter_pub, "challenge_id": vt.challenge_id,
+                   "support": vt.support, "nonce": vt.nonce,
+                   "txid": vt.txid(), "sig_hex": vt.sig.hex()} for vt in votes],
         "root_after_vote": root_after_vote,
         "resolve_height": 2 + CHALLENGE_WINDOW,
         "root_after_resolve": led2.root(),
         "challenger_balance_after": led2.balance(address(k2.pub)),
-        "data_root_of_three": data_root([sub, ch, vote]),
+        "data_root_of_all": data_root([sub, ch] + votes),
     }]
 
     # --- FULL-CHAIN REPLAY: a mini chain with a fork and settled transfers ----

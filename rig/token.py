@@ -42,6 +42,10 @@ SHARE_DATA = 2_000                 # the data contributors whose corpus trained 
 CHALLENGE_WINDOW = 20              # blocks a challenge stays open for votes
 PROPOSER_LOOKBACK = 32             # only recent block proposers may vote
 GENESIS_DATA_WEIGHT = 1_000_000    # royalty weight of the genesis corpus entry
+CHALLENGE_QUORUM = 3               # min affirmative juror votes to uphold a
+                                   # challenge — one juror must never be able to
+                                   # seize an owner's stake; below quorum the
+                                   # challenge is rejected (safe default)
 
 
 def address(pub_hex: str) -> str:
@@ -256,7 +260,12 @@ class TokenLedger:
             if ch["expiry"] > height:
                 continue
             entry = self.registry.get(ch["data_id"])
-            upheld = len(ch["votes_for"]) > len(ch["votes_against"]) and ch["votes_for"]
+            # QUORUM: a challenge is upheld only with a strict majority AND at
+            # least CHALLENGE_QUORUM affirmative juror votes. Below quorum (too
+            # few disinterested jurors showed up) it is rejected — the challenger
+            # cannot seize stake on a thin or single vote.
+            upheld = (len(ch["votes_for"]) >= CHALLENGE_QUORUM
+                      and len(ch["votes_for"]) > len(ch["votes_against"]))
             if upheld and entry is not None:
                 entry["status"] = "revoked"
                 self._credit(ch["challenger"], entry["stake"] + ch["stake"])
@@ -299,6 +308,14 @@ class TokenLedger:
             ch = self.challenges.get(tx.challenge_id)
             if (ch is None or tx.voter_pub not in recent_proposers
                     or src in ch["votes_for"] or src in ch["votes_against"]):
+                return False
+            # DISINTERESTED JURORS ONLY: neither the challenger nor the data
+            # owner may vote on their own challenge — both have a direct stake
+            # in the outcome. Jurors are disinterested recent proposers.
+            if src == ch["challenger"]:
+                return False
+            entry = self.registry.get(ch["data_id"])
+            if entry is not None and src == entry["owner"]:
                 return False
             (ch["votes_for"] if tx.support else ch["votes_against"]).append(src)
             ch["votes_for"].sort(); ch["votes_against"].sort()   # canonical
