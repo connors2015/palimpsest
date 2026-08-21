@@ -111,6 +111,13 @@ impl Store {
     pub fn read_snapshot(&self) -> Option<(String, u64, Vec<i64>, TokenLedger)> {
         let meta: serde_json::Value = serde_json::from_slice(
             &fs::read(self.dir.join("snapshot.json")).ok()?).ok()?;
+        // reject pre-ledger snapshots (older format) — seeding an empty ledger
+        // would corrupt balances, and fast_replay would NOT fall back since it
+        // "succeeded". No ledger field => None => full validated replay.
+        if !meta["ledger"].is_object() {
+            warn!("snapshot has no ledger (old format) — ignoring, will full-replay");
+            return None;
+        }
         let raw = fs::read(self.dir.join("snapshot.bin")).ok()?;
         let state = raw.chunks_exact(8)
             .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
