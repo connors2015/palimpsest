@@ -1,24 +1,25 @@
 # Palimpsest seed node — always-on bootstrap peer + relay for the network.
 #
-# v2: runs the PRODUCTION RUST NODE (palimpsest-node) in --relay-server mode:
-# a stable dial target, chain-sync source, circuit-relay v2 for NAT'd peers,
-# and the HTTP API. An init container materializes the published genesis
-# artifact (deterministic from the published seed); the main container builds
-# the node from the pinned repo and runs it.
+# v3: a StatefulSet with a PERSISTENT VOLUME (the chain store survives pod
+# reschedule — no more emptyDir data loss) running the PREBUILT node image
+# (deploy/Dockerfile, built + pushed by CI — no compile-on-boot). Identity comes
+# from a k8s Secret; genesis is materialized once onto the persistent volume by
+# an init container and then reused.
 #
+#   # one-time setup:
+#   kubectl create secret generic palimpsest-seed-key \
+#     --from-literal=key-seed=$(head -c32 /dev/urandom | xxd -p -c64) -n palimpsest
 #   kubectl apply -f deploy/seed-node.yaml
-#   gossip/relay:  <node-ip>:30980 (udp+tcp)     api:  http://<node-ip>:30981
 #
-# NOTE: first boot compiles the node (~8 min) and downloads CPU torch for the
-# genesis artifact (~3 min). A prebuilt image is the obvious optimization once
-# releases are cut; correctness first.
+#   gossip/relay:  <node-ip>:30980 (udp+tcp)     api:  http://<node-ip>:30981
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: seed-node
   namespace: palimpsest
   labels: {app: palimpsest-seed}
 spec:
+  serviceName: seed-node
   replicas: 1
   selector:
     matchLabels: {app: palimpsest-seed}
@@ -27,49 +28,47 @@ spec:
       labels: {app: palimpsest-seed}
     spec:
       initContainers:
+        # Materialize the deterministic genesis onto the persistent volume ONCE.
+        # (Skipped on every subsequent boot — the file persists on the PVC.)
         - name: genesis
           image: python:3.12-bookworm
           command: ["/bin/bash", "-lc"]
           args:
             - |
               set -e
-              if [ -f /shared/genesis.bin ]; then exit 0; fi
+              if [ -f /data/genesis-seed.bin ]; then exit 0; fi
               mkdir -p ~/.ssh && cp /keys/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
               ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
               git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
               cd /app
               pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
               pip install --no-cache-dir numpy pynacl
-              python -m client.make_genesis --model small --seed 1337 --out /shared/genesis.bin
+              python -m client.make_genesis --model small --seed 1337 --out /data/genesis-seed.bin
           volumeMounts:
             - {name: deploy-key, mountPath: /keys, readOnly: true}
-            - {name: shared, mountPath: /shared}
+            - {name: data, mountPath: /data}
       containers:
         - name: seed
-          image: rust:1-bookworm
-          command: ["/bin/bash", "-c"]   # NOT -l: a login shell drops cargo from PATH
+          # CI builds + pushes this by git SHA; pin a digest in production.
+          image: ghcr.io/connors2015/palimpsest-node:latest
           args:
-            - |
-              set -e
-              export PATH=/usr/local/cargo/bin:$PATH
-              mkdir -p ~/.ssh && cp /keys/id_ed25519 ~/.ssh/ && chmod 600 ~/.ssh/id_ed25519
-              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-              git clone --depth 1 git@github.com:connors2015/palimpsest.git /app
-              cd /app/node && cargo build --release
-              # identity comes from a k8s Secret via env (never argv / never in
-              # this manifest). Create it once with:
-              #   kubectl create secret generic palimpsest-seed-key \
-              #     --from-literal=key-seed=$(head -c32 /dev/urandom | xxd -p -c64)
-              exec target/release/palimpsest-node \
-                --data-dir /data \
-                --genesis-file /shared/genesis.bin \
-                --port 9800 --api-port 8080 --bridge-port 7999 \
-                --relay-server \
-                --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
+            - --data-dir=/data
+            - --genesis-file=/data/genesis-seed.bin
+            - --port=9800
+            - --api-port=8080
+            - --api-bind=0.0.0.0
+            - --bridge-port=7999
+            - --relay-server
+            - --prune-depth=8
+            - --data-contributor=3432d48fd6878b4f2e7a1e40cc15e112c512fae7
           env:
             - name: PALIMPSEST_KEY_SEED
               valueFrom:
                 secretKeyRef: {name: palimpsest-seed-key, key: key-seed}
+            # set to enable /upload + /chat; unset leaves them disabled (safe)
+            - name: PALIMPSEST_API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: palimpsest-seed-key, key: api-token, optional: true}
           ports:
             - {containerPort: 9800, protocol: UDP, name: gossip-udp}
             - {containerPort: 9800, protocol: TCP, name: gossip-tcp}
@@ -78,21 +77,26 @@ spec:
             requests: {cpu: "1", memory: 3Gi}
             limits: {cpu: "4", memory: 8Gi}
           volumeMounts:
-            - {name: deploy-key, mountPath: /keys, readOnly: true}
-            - {name: shared, mountPath: /shared}
             - {name: data, mountPath: /data}
           readinessProbe:
             httpGet: {path: /status, port: 8080}
-            initialDelaySeconds: 240
+            initialDelaySeconds: 15
             periodSeconds: 20
-            failureThreshold: 60
+            failureThreshold: 30
+          lifecycle:
+            preStop:
+              # give the node time to flush its final snapshot on SIGTERM
+              exec: {command: ["sleep", "5"]}
+      terminationGracePeriodSeconds: 40
       volumes:
         - name: deploy-key
           secret: {secretName: seed-deploy-key, defaultMode: 0400}
-        - name: shared
-          emptyDir: {}
-        - name: data
-          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: {storage: 20Gi}
 ---
 apiVersion: v1
 kind: Service

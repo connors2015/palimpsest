@@ -53,6 +53,31 @@ jobs:
         working-directory: node
         run: cargo test --test golden
 
+  # Build the immutable release image; push it (tagged by SHA + latest) on main.
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: log in to ghcr (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/connors2015/palimpsest-node:latest
+            ghcr.io/connors2015/palimpsest-node:${{ github.sha }}
+
   # The reference test suite. Advisory until the suite is pinned + green
   # (tracked separately); surfaces regressions in the rig without blocking.
   python-rig:
