@@ -48,6 +48,28 @@ const SYNC_MAX_BLOCKS: usize = 64;
 const SYNC_BYTE_BUDGET: usize = 48 * 1024 * 1024;
 const SYNC_INFLIGHT_TIMEOUT: f64 = 30.0;
 
+/// Coordinates per aggregation chunk — the memory/latency knob (K deltas ×
+/// this many i64 at once, ~8MB for the default, vs K × the whole 86M state).
+const AGG_CHUNK: usize = 1 << 20;
+
+/// Chunked, bounded-memory aggregation over SPARSE delta payloads. Bit-identical
+/// to `core::trimmed_mean` over the full dense deltas (each coordinate's sort/
+/// trim/mean is unchanged), but never materializes more than AGG_CHUNK
+/// coordinates × K deltas at once — so a small peer can aggregate an 86M-param
+/// block without holding K × ~0.7GB of dense deltas.
+pub fn chunked_aggregate(payloads: &[&Payload], n: usize, chunk_size: usize) -> Vec<i64> {
+    let mut out = vec![0i64; n];
+    let step = chunk_size.max(1);
+    let mut c = 0;
+    while c < n {
+        let hi = (c + step).min(n);
+        let chunk: Vec<Vec<i64>> = payloads.iter().map(|p| p.dense_range(c, hi)).collect();
+        out[c..hi].copy_from_slice(&core::trimmed_mean(&chunk, 0.2));
+        c = hi;
+    }
+    out
+}
+
 /// A delta is worth holding only if its base_height sits in the includable
 /// window around the current head. Pure + total so it can be unit-tested.
 pub fn delta_in_window(base_height: u64, head_height: u64) -> bool {
@@ -75,6 +97,36 @@ mod mempool_bounds_tests {
         assert!(delta_in_window(0, 0));
         assert!(delta_in_window(3, 0));
         assert!(!delta_in_window(0 + DELTA_FUTURE_WINDOW + 1, 0));
+    }
+
+    #[test]
+    fn chunked_aggregate_equals_dense() {
+        // chunked aggregation over sparse payloads must be bit-identical to the
+        // dense trimmed_mean, across MULTIPLE chunks (chunk_size < n).
+        let n = 5000usize;
+        let mk = |seed: i64| -> Vec<i64> {
+            (0..n as i64)
+                .map(|i| if (i + seed) % 5 == 0 { (i * seed) % 97 - 48 } else { 0 })
+                .collect()
+        };
+        let dense: Vec<Vec<i64>> = (1..=5).map(mk).collect();
+        let sparse = |d: &[i64]| -> Payload {
+            let (mut idx, mut val) = (Vec::new(), Vec::new());
+            for (i, &x) in d.iter().enumerate() {
+                if x != 0 {
+                    idx.extend_from_slice(&(i as u32).to_le_bytes());
+                    val.extend_from_slice(&(x as i32).to_le_bytes());
+                }
+            }
+            Payload { n: d.len(), idx: b64(&idx), val: b64(&val) }
+        };
+        let payloads: Vec<Payload> = dense.iter().map(|d| sparse(d)).collect();
+        let refs: Vec<&Payload> = payloads.iter().collect();
+        let dense_mean = core::trimmed_mean(&dense, 0.2);
+        // a chunk size that divides the range unevenly, forcing several chunks
+        assert_eq!(chunked_aggregate(&refs, n, 1000), dense_mean, "chunk=1000");
+        assert_eq!(chunked_aggregate(&refs, n, 777), dense_mean, "uneven chunk");
+        assert_eq!(chunked_aggregate(&refs, n, n), dense_mean, "single chunk");
     }
 }
 
@@ -415,10 +467,13 @@ impl Node {
             }
         }
         // weight-state transition
-        let deltas: Vec<Vec<i64>> = chosen.iter()
-            .map(|t| self.payloads[&t.txid()].dense().unwrap()).collect();
-        let mean = core::trimmed_mean(&deltas, 0.2);
         let parent_w = &self.tree.state[&head];
+        // chunked aggregation over the sparse payloads — bounded memory, but
+        // bit-identical to core::trimmed_mean over the full dense deltas, so the
+        // committed state_root reproduces on any validator.
+        let payload_refs: Vec<&Payload> =
+            chosen.iter().map(|t| &self.payloads[&t.txid()]).collect();
+        let mean = chunked_aggregate(&payload_refs, parent_w.len(), AGG_CHUNK);
         // wrapping_add mirrors numpy int64 (matches validate_block exactly)
         let w: Vec<i64> = parent_w.iter().zip(&mean).map(|(a, b)| a.wrapping_add(*b)).collect();
         // account lanes: dry-run in the validator's exact order
@@ -474,8 +529,8 @@ impl Node {
             data_txs,
         };
         let mut bodies = HashMap::new();
-        for (t, d) in chosen.iter().zip(deltas) {
-            bodies.insert(t.da_pointer.clone(), d);
+        for t in chosen.iter() {
+            bodies.insert(t.da_pointer.clone(), self.payloads[&t.txid()].dense().unwrap());
         }
         let block = palimpsest_core::blocktree::Block {
             header, txs: chosen, bodies,

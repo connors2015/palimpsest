@@ -40,6 +40,21 @@ impl Payload {
         Some(core::decompress(self.n, &idx, &val))
     }
 
+    /// Decompress only coordinates [lo, hi) — the bounded-memory building block
+    /// for chunked aggregation, so a small peer never materializes the full
+    /// dense delta. Identical to `dense()[lo..hi]` without allocating the whole.
+    pub fn dense_range(&self, lo: usize, hi: usize) -> Vec<i64> {
+        let mut out = vec![0i64; hi.saturating_sub(lo)];
+        let (Some(idx), Some(val)) = (unb64(&self.idx), unb64(&self.val)) else { return out };
+        for i in 0..idx.len() / 4 {
+            let j = u32::from_le_bytes(idx[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+            if j >= lo && j < hi {
+                out[j - lo] = i32::from_le_bytes(val[i * 4..i * 4 + 4].try_into().unwrap()) as i64;
+            }
+        }
+        out
+    }
+
     pub fn wire_bytes(&self) -> usize {
         self.idx.len() * 3 / 4 + self.val.len() * 3 / 4
     }
