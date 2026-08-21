@@ -108,18 +108,84 @@ impl Store {
             let _ = fs::remove_file(&tmp);
             return false;
         }
+        // DA: erasure-code the body into shards so it stays recoverable even if
+        // the monolithic file is later lost/pruned (best-effort; the monolithic
+        // copy is the fast path, shards are the durability floor).
+        let _ = self.disperse_payload(txid, p);
         true
     }
 
     pub fn get_payload(&self, txid: &str) -> Option<Payload> {
-        let raw = fs::read(self.dir.join("payloads").join(format!("{txid}.json"))).ok()?;
-        serde_json::from_slice(&raw).ok()
+        // monolithic body first; if it's gone, reconstruct from erasure shards
+        // (the DA layer) — so losing a body file never blocks replay/sync as
+        // long as any K of the N shards survive.
+        if let Ok(raw) = fs::read(self.dir.join("payloads").join(format!("{txid}.json"))) {
+            if let Ok(p) = serde_json::from_slice(&raw) {
+                return Some(p);
+            }
+        }
+        self.reconstruct_payload(txid)
     }
 
     /// Delete a payload that will never be part of a block (a mempool delta
     /// evicted before inclusion) — reclaims disk from spammed/never-mined deltas.
     pub fn remove_payload(&self, txid: &str) {
         let _ = fs::remove_file(self.dir.join("payloads").join(format!("{txid}.json")));
+        let _ = fs::remove_dir_all(self.dir.join("da").join(txid));
+    }
+
+    // ---- data availability: erasure-coded shards (§3.3) ------------------
+    /// Reed-Solomon parameters: K data shards, N total. A body survives losing
+    /// up to N-K shards, and any K reconstruct it.
+    pub const DA_K: usize = 4;
+    pub const DA_N: usize = 12;
+
+    /// Erasure-code + Merkle-commit a payload into N shards under da/<txid>/, so
+    /// the body is recoverable from any K of them. Returns the DA root (hex) that
+    /// commits the shard set. Idempotent.
+    pub fn disperse_payload(&self, txid: &str, p: &Payload) -> Option<String> {
+        let dir = self.dir.join("da").join(txid);
+        let meta_path = dir.join("meta.json");
+        if let Ok(m) = fs::read(&meta_path) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&m) {
+                if let Some(r) = v["root"].as_str() {
+                    return Some(r.to_string()); // already dispersed
+                }
+            }
+        }
+        let bytes = serde_json::to_vec(p).ok()?;
+        let blob = palimpsest_core::da::disperse(&bytes, Self::DA_K, Self::DA_N);
+        fs::create_dir_all(&dir).ok()?;
+        for (i, sh) in blob.shards.iter().enumerate() {
+            let _ = fs::write(dir.join(format!("{i}.shard")), sh);
+        }
+        let root = hex::encode(blob.root());
+        let meta = serde_json::json!({
+            "root": root, "orig_len": bytes.len(), "k": Self::DA_K, "n": Self::DA_N,
+        });
+        let _ = fs::write(&meta_path, meta.to_string());
+        Some(root)
+    }
+
+    /// Reconstruct a payload from whatever shards survive on disk (needs >= K).
+    /// None if too few shards remain (the body is unrecoverable locally).
+    pub fn reconstruct_payload(&self, txid: &str) -> Option<Payload> {
+        let dir = self.dir.join("da").join(txid);
+        let meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("meta.json")).ok()?).ok()?;
+        let k = meta["k"].as_u64()? as usize;
+        let orig_len = meta["orig_len"].as_u64()? as usize;
+        let mut shards = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(&dir).ok()?.flatten() {
+            let name = entry.file_name().into_string().ok()?;
+            if let Some(i) = name.strip_suffix(".shard").and_then(|s| s.parse::<usize>().ok()) {
+                if let Ok(data) = fs::read(entry.path()) {
+                    shards.insert(i, data);
+                }
+            }
+        }
+        let bytes = palimpsest_core::da::reconstruct(&shards, k, orig_len)?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     // ---- block log -------------------------------------------------------
@@ -392,6 +458,30 @@ mod store_tests {
         assert!(!fs::read_to_string(&path).unwrap().contains("ZZZTORN"),
                 "torn line must be truncated from disk");
         assert_eq!(store.read_blocks().len(), 2, "re-read is clean");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn da_recovers_body_from_shards() {
+        let dir = tmpdir("da");
+        let store = Store::open(dir.to_str().unwrap()).unwrap();
+        let p = Payload { n: 7, idx: "AAECAwQF".into(), val: "BgcICQoL".into() };
+        let txid = "deadbeefcafe";
+        assert!(store.put_payload(txid, &p)); // writes monolithic + N shards
+
+        // lose the monolithic body AND N-K shards — still recoverable (K remain)
+        let _ = fs::remove_file(dir.join("payloads").join(format!("{txid}.json")));
+        let (n, k) = (Store::DA_N, Store::DA_K);
+        for i in 0..(n - k) {
+            let _ = fs::remove_file(dir.join("da").join(txid).join(format!("{i}.shard")));
+        }
+        let got = store.get_payload(txid).expect("K shards must reconstruct the body");
+        assert_eq!((got.n, got.idx, got.val), (p.n, p.idx.clone(), p.val.clone()),
+                   "reconstructed payload must equal the original");
+
+        // drop one more shard (now < K) → the body is unrecoverable locally
+        let _ = fs::remove_file(dir.join("da").join(txid).join(format!("{}.shard", n - k)));
+        assert!(store.get_payload(txid).is_none(), "below K shards must be unrecoverable");
         let _ = fs::remove_dir_all(&dir);
     }
 
