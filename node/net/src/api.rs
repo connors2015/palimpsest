@@ -89,9 +89,16 @@ pub async fn run(port: u16, tx: mpsc::Sender<ApiCmd>) {
         .route("/data/challenge", post(data_challenge))
         .route("/data/vote", post(data_vote))
         .with_state(Api { tx });
-    let Ok(listener) = tokio::net::TcpListener::bind(("0.0.0.0", port)).await else {
-        tracing::warn!("api port {port} unavailable");
-        return;
+    // retry the bind: fast restarts leave the old socket lingering briefly, and
+    // a silently-dead API made live nodes look wedged during the rehearsal
+    let listener = loop {
+        match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+            Ok(l) => break l,
+            Err(e) => {
+                tracing::warn!("api port {port} busy ({e}); retrying in 3s");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
     };
     info!("http api on 0.0.0.0:{port}");
     let _ = axum::serve(listener, app).await;
