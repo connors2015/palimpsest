@@ -47,10 +47,13 @@ Two jobs earn the token; do either or both.
 
 **Train (mining).** Add `--produce` to the node, then attach the PyTorch trainer
 — it pulls the head weights, trains locally, and returns compressed deltas the
-node gossips:
+node gossips. Provenance is required (rev 5): every delta must name the staked
+corpus it trains on via `--data-refs` — during the devnet that's the always-staked
+founding corpus, `--data-refs genesis`; once you stake your own corpus, name its
+data hash instead and the block data share pays *you*:
 
 ```bash
-target/release/palimpsest-node ... --produce --bridge-port 7999   # add --produce
+target/release/palimpsest-node ... --produce --bridge-port 7999 --data-refs genesis
 python -m client.miner_bridge --node-port 7999 --model <MODEL> --data <corpus.txt> --device cuda
 ```
 
