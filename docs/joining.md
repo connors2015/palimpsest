@@ -15,7 +15,7 @@ genesis file to download, no seed to reproduce.
 >
 > | | value |
 > |---|---|
-> | bootstrap peer | `/ip4/169.58.211.248/udp/9800/quic-v1` |
+> | bootstrap peer | `/ip4/169.58.211.248/tcp/9800` |
 > | genesis id | `30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28` |
 > | model | 85.4M-param GPT, from-scratch genesis (seed 1337) |
 > | public API | `http://169.58.211.248:8080/status` |
@@ -34,7 +34,7 @@ target/release/palimpsest-node \
   --data-dir ~/.palimpsest \
   --key-file ~/.palimpsest.key \
   --genesis-hash 30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28 \
-  --peers /ip4/169.58.211.248/udp/9800/quic-v1 \
+  --peers /ip4/169.58.211.248/tcp/9800 \
   --api-port 8090
 ```
 
