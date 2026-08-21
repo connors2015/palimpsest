@@ -56,9 +56,37 @@ class Header:
     # the PROPOSER LOTTERY (rev 4): the proposer's VRF proof over the height seed.
     # header.work is derived from it (non-forgeable), replacing free-form work.
     vrf_proof: str = ""        # hex of the deterministic-Ed25519 VRF signature
+    # DELTA SCORING (rev 7): commitment to the proposer's held-out-loss scores
+    # for the block's deltas. Scores are BLOCK DATA (committed, not recomputed),
+    # so consensus stays deterministic across GPUs; truthfulness is bonded and
+    # challengeable (the commit-reveal committee is the testnet upgrade).
+    score_root: str = ""
 
     def block_hash(self) -> str:
         return _sha(json.dumps(self.__dict__, sort_keys=True).encode())
+
+
+# rev 7: a delta's score = its held-out loss improvement in micro-nats, >= 0,
+# clamped by consensus so a lying proposer can't mint unbounded weight.
+SCORE_CAP = 10**9
+
+
+def scores_root(scores: dict) -> str:
+    """Canonical commitment to {txid: score}: sorted compact JSON, hashed."""
+    blob = json.dumps({k: int(v) for k, v in scores.items()},
+                      sort_keys=True, separators=(",", ":")).encode()
+    return _sha(blob)
+
+
+def effective_scores(txs: list, scores: dict) -> dict:
+    """Consensus scores used for reward weighting: the committed score per txid,
+    with a UNIFORM fallback (all 1) when every score is zero — an unscored block
+    (bootstrap, eval timeout) still splits rewards equally rather than burning
+    them. Deterministic from block content only."""
+    eff = {t.txid(): int(scores.get(t.txid(), 0)) for t in txs}
+    if eff and sum(eff.values()) == 0:
+        eff = {k: 1 for k in eff}
+    return eff
 
 
 @dataclass
@@ -68,6 +96,7 @@ class Block:
     bodies: dict               # da_pointer -> int64 delta array (carried for replay)
     transfers: list = field(default_factory=list)   # list[TransferTx]
     data_txs: list = field(default_factory=list)    # rev 3: Data{Submit,Challenge,Vote}Tx
+    scores: dict = field(default_factory=dict)      # rev 7: txid -> micro-nat score
 
     @property
     def hash(self) -> str:
@@ -107,19 +136,26 @@ def apply_ledger(parent_ledger: TokenLedger, block: Block,
             raise ValidationError(
                 f"delta {tx.txid()[:8]} names no staked/available data "
                 f"(provenance required)")
-    # data-share credits: split across the corpora THIS block's deltas named,
-    # each weighted by its registry weight (interim; loss-score replaces this
-    # when delta scoring is enforced). Named more times / higher stake ⇒ more.
+    # DELTA SCORING (rev 7): rewards are weighted by each delta's committed
+    # held-out-loss score. Miners: pool split ∝ their deltas' scores. Data: each
+    # delta's score splits equally across its named active corpora (scaled by
+    # 10_000 so integer division doesn't vanish small scores). All-zero scores
+    # fall back to uniform — deterministic from block content alone.
+    eff = effective_scores(block.txs, block.scores)
+    miner_weights: dict[str, int] = {}
     data_credits: dict[str, int] = {}
-    hash_weight = {e["data_hash"]: e["weight"] for e in led.registry.values()
-                   if e["status"] == "active" and e["weight"] > 0}
+    active_set = {e["data_hash"] for e in led.registry.values()
+                  if e["status"] == "active" and e["weight"] > 0}
     for tx in block.txs:
-        for r in tx.canonical_refs():
-            if r in hash_weight:
-                data_credits[r] = data_credits.get(r, 0) + hash_weight[r]
+        s = eff[tx.txid()]
+        miner_weights[tx.miner] = miner_weights.get(tx.miner, 0) + s
+        named = [r for r in tx.canonical_refs() if r in active_set]
+        for r in named:
+            data_credits[r] = data_credits.get(r, 0) + s * 10_000 // len(named)
     led.apply_reward(h, miner_pubs=[tx.miner for tx in block.txs],
                      proposer_pub=block.header.proposer,
                      data_credits=data_credits,
+                     miner_weights=miner_weights,
                      data_addrs=[data_contributor] if data_contributor else [])
     # lock each included delta's admission bond from its miner's balance (after
     # the reward, so this block's reward can fund this block's bond). A miner who
@@ -194,6 +230,19 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
     # 2. tx-set root matches
     if txset_root(block.txs) != h.txset_root:
         raise ValidationError("txset_root mismatch")
+    # 2b. DELTA SCORES (rev 7): exactly one committed score per included tx,
+    #     integer in [0, SCORE_CAP], and the commitment reproduces. Scores are
+    #     block data — validators never recompute the float eval (cross-GPU
+    #     nondeterminism stays outside consensus); a fraudulent score is a
+    #     bonded, challengeable claim.
+    txids = {t.txid() for t in block.txs}
+    if set(block.scores.keys()) != txids:
+        raise ValidationError("scores must cover exactly the included txs")
+    for k, v in block.scores.items():
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= SCORE_CAP:
+            raise ValidationError(f"score out of range for {k[:8]}")
+    if scores_root(block.scores) != h.score_root:
+        raise ValidationError("score_root mismatch")
     # 3. the state transition reproduces the committed root (deterministic, §3.4)
     deltas = [block.bodies[tx.da_pointer] for tx in block.txs]
     w = parent_w_int + trimmed_mean_int(deltas) if deltas else parent_w_int.copy()
@@ -325,11 +374,13 @@ class BlockTree:
 
 def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
                 works: dict, proposer_key, transfers: list | None = None,
-                data_txs: list | None = None) -> Block:
+                data_txs: list | None = None,
+                scores: dict | None = None) -> Block:
     """Assemble a valid block extending `parent_hash` from accepted txs, plus the
-    transfer lane (rev 2), the data lane (rev 3), and the proposer's VRF proof
-    (rev 4). `proposer_key` signs the VRF proof; header.work is the non-forgeable
-    vrf_work derived from it (`works` is retained for the future scored mempool)."""
+    transfer lane (rev 2), the data lane (rev 3), the proposer's VRF proof
+    (rev 4), and the proposer's committed delta scores (rev 7 — omitted scores
+    default to zero, which reward-weights uniformly). `proposer_key` signs the
+    VRF proof; header.work is the non-forgeable vrf_work derived from it."""
     from . import lottery
     parent_w = tree.state[parent_hash]
     transfers = list(transfers or [])
@@ -338,15 +389,16 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
     deltas = [bodies[tx.da_pointer] for tx in accepted]
     w = parent_w + trimmed_mean_int(deltas) if deltas else parent_w.copy()
     vrf_proof = lottery.vrf_prove(proposer_key, parent_hash, height)
+    blk_scores = {t.txid(): int((scores or {}).get(t.txid(), 0)) for t in accepted}
     header = Header(
         height=height,
         prev_hash=parent_hash, state_root=state_root(w),
         txset_root=txset_root(accepted), n_txs=len(accepted),
         work=lottery.vrf_work(vrf_proof), proposer=proposer_key.pub,
-        vrf_proof=vrf_proof.hex())
+        vrf_proof=vrf_proof.hex(), score_root=scores_root(blk_scores))
     block = Block(header, accepted,
                   {t.da_pointer: bodies[t.da_pointer] for t in accepted},
-                  transfers, data_txs)
+                  transfers, data_txs, blk_scores)
     # commit the full token transition into the header
     header.transfer_root = xfer_root(transfers)
     header.data_root = dta_root(data_txs)

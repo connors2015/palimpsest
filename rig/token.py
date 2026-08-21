@@ -149,7 +149,12 @@ class DataChallengeTx:
     challenger_pub: str
     data_id: str
     stake: int
-    reason: str                    # "validity" | "ownership"
+    reason: str                    # "validity" | "ownership" | "availability"
+                                   # (rev 5/7: availability = the staked bytes are
+                                   # no longer retrievable from the DA layer; an
+                                   # upheld challenge slashes the stake and revokes
+                                   # the entry, so vanished data stops being
+                                   # namable by deltas and stops earning)
     nonce: int
     sig: bytes = b""
 
@@ -284,7 +289,8 @@ class TokenLedger:
     # ---- block reward ----------------------------------------------------
     def apply_reward(self, height: int, miner_pubs: list[str],
                      proposer_pub: str, data_addrs: list[str] = (),
-                     *, data_credits: dict[str, int] = None):
+                     *, data_credits: dict[str, int] = None,
+                     miner_weights: dict[str, int] = None):
         """Mint the block's emission and split it. Integer division truncates;
         the remainder (dust) is deliberately burned — supply never exceeds the
         schedule. Deterministic given identical inputs on every node.
@@ -311,9 +317,17 @@ class TokenLedger:
             miners_pool += self.fee_train_pool
             self.fee_train_pool = 0
         if miner_pubs:
-            each = miners_pool // len(miner_pubs)
-            for pub in sorted(miner_pubs):                 # canonical order
-                self._credit(address(pub), each)
+            # rev 7: split ∝ committed delta score when weights are given (and
+            # nonzero); equal split otherwise. Dust burned either way.
+            weights = {p: (miner_weights or {}).get(p, 0) for p in miner_pubs}
+            wsum = sum(weights.values())
+            if wsum > 0:
+                for pub in sorted(set(miner_pubs)):        # canonical order
+                    self._credit(address(pub), miners_pool * weights[pub] // wsum)
+            else:
+                each = miners_pool // len(miner_pubs)
+                for pub in sorted(miner_pubs):
+                    self._credit(address(pub), each)
         if proposer_pub and proposer_pub != "genesis":
             self._credit(address(proposer_pub), proposer_cut)
         # data share → owners named by this block's deltas, ∝ contribution weight.

@@ -126,6 +126,39 @@ def run(a):
                                  "payload": _payload_json(payload)})
                     print(f"h{want_h}: trained {a.inner}x{a.batch}, "
                           f"loss {loss:.3f}", flush=True)
+                elif t == "eval":
+                    # rev 7 DELTA SCORING: measure each candidate delta's loss
+                    # improvement on a HELD-OUT batch (val split, seeded from the
+                    # block context so the shard is not miner-chosen). The node
+                    # commits the returned micro-nat scores in its block; reward
+                    # weighting follows them. Scores are per-proposer claims —
+                    # bonded and challengeable — so float nondeterminism between
+                    # GPUs never touches consensus.
+                    import torch
+                    want_h = int(msg.get("height", -1))
+                    if state is None or want_h != height:
+                        _send(sock, {"t": "scores", "height": want_h,
+                                     "scores": {}})
+                        continue
+                    gen = torch.Generator().manual_seed(int(msg.get("seed", 0)))
+                    xb, yb = data.get_batch("val", a.batch, generator=gen)
+                    scores = {}
+                    model.eval()
+                    with torch.no_grad():
+                        _, base_loss = model(xb, yb)
+                        base = float(base_loss)
+                        for d in msg.get("deltas", []):
+                            cand = state + _sparse_dense(d["sparse"])
+                            set_flat_params(model, dequantize(cand))
+                            _, l = model(xb, yb)
+                            scores[d["txid"]] = max(
+                                0, int(round((base - float(l)) * 1e6)))
+                        set_flat_params(model, dequantize(state))  # restore head
+                    model.train()
+                    _send(sock, {"t": "scores", "height": height,
+                                 "scores": scores})
+                    print(f"h{height}: scored {len(scores)} deltas "
+                          f"(base loss {base:.3f})", flush=True)
                 elif t == "generate":
                     # serve chat from the chain-synced model (works on any
                     # bridge; a --produce-less node makes this a pure server)
