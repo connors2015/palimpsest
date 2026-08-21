@@ -187,3 +187,40 @@ fn challenge_below_quorum_is_rejected_and_refunds_owner() {
     assert_eq!(led.balance(&chal_addr), chal_before,
                "rejected challenger recovers nothing");
 }
+
+// --- snapshot (de)serialization hardening (task 94) -------------------------
+
+#[test]
+fn snapshot_roundtrips_and_rejects_malformed() {
+    use serde_json::json;
+    // a populated ledger (balances, nonces, a registry entry, an open challenge)
+    let (led, _o, _c, _j, _d, _cid) = open_challenge();
+
+    // a well-formed snapshot round-trips to the exact same root
+    let good = led.to_value();
+    let back = TokenLedger::from_value(&good).expect("valid snapshot must round-trip");
+    assert_eq!(back.root(), led.root(), "round-trip must preserve the ledger root");
+
+    // a non-integer balance is rejected (would corrupt supply / panic on math)
+    let mut bad = led.to_value();
+    let addr = bad["balances"].as_object().unwrap().keys().next().unwrap().clone();
+    bad["balances"][addr.as_str()] = json!("not-a-number");
+    assert!(TokenLedger::from_value(&bad).is_none(), "string balance must be rejected");
+
+    // a registry entry missing a field is rejected (would panic apply_reward)
+    let mut bad = led.to_value();
+    let did = bad["registry"].as_object().unwrap().keys().next().unwrap().clone();
+    bad["registry"][did.as_str()].as_object_mut().unwrap().remove("stake");
+    assert!(TokenLedger::from_value(&bad).is_none(), "registry entry missing stake must be rejected");
+
+    // a challenge whose vote list isn't an array of strings is rejected
+    let mut bad = led.to_value();
+    let cid = bad["challenges"].as_object().unwrap().keys().next().unwrap().clone();
+    bad["challenges"][cid.as_str()]["votes_for"] = json!([1, 2, 3]);
+    assert!(TokenLedger::from_value(&bad).is_none(), "non-string vote list must be rejected");
+
+    // a missing top-level section is rejected
+    let mut bad = led.to_value();
+    bad.as_object_mut().unwrap().remove("challenges");
+    assert!(TokenLedger::from_value(&bad).is_none(), "missing section must be rejected");
+}

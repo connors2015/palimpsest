@@ -415,20 +415,62 @@ impl TokenLedger {
     }
 
     /// Reconstruct a ledger from a snapshot value (inverse of to_value).
-    pub fn from_value(v: &serde_json::Value) -> Self {
+    ///
+    /// Returns None if the value is malformed in ANY way — wrong top-level
+    /// shape, a non-integer balance/nonce, or a registry/challenge entry missing
+    /// a field (or of the wrong type) that a later ledger path unwraps. A
+    /// snapshot is untrusted input on the fast-boot path; seeding a partially-
+    /// built ledger from it would either corrupt balances or panic a
+    /// snapshot-booted node inside validate_block while block-synced peers march
+    /// on. On None the caller falls back to full validated replay from genesis.
+    pub fn from_value(v: &serde_json::Value) -> Option<Self> {
         let mut led = TokenLedger::new();
-        if let Some(m) = v["balances"].as_object() {
-            for (k, x) in m { led.balances.insert(k.clone(), x.as_u64().unwrap_or(0)); }
+        for (k, x) in v["balances"].as_object()? {
+            led.balances.insert(k.clone(), x.as_u64()?);
         }
-        if let Some(m) = v["nonces"].as_object() {
-            for (k, x) in m { led.nonces.insert(k.clone(), x.as_u64().unwrap_or(0)); }
+        for (k, x) in v["nonces"].as_object()? {
+            led.nonces.insert(k.clone(), x.as_u64()?);
         }
-        if let Some(m) = v["registry"].as_object() {
-            for (k, x) in m { led.registry.insert(k.clone(), x.clone()); }
+        for (k, e) in v["registry"].as_object()? {
+            if !valid_registry_entry(e) {
+                return None;
+            }
+            led.registry.insert(k.clone(), e.clone());
         }
-        if let Some(m) = v["challenges"].as_object() {
-            for (k, x) in m { led.challenges.insert(k.clone(), x.clone()); }
+        for (k, c) in v["challenges"].as_object()? {
+            if !valid_challenge(c) {
+                return None;
+            }
+            led.challenges.insert(k.clone(), c.clone());
         }
-        led
+        Some(led)
     }
+}
+
+/// Every field the reward/resolve/apply/root paths read off a registry entry,
+/// with the type they unwrap — validated once at snapshot load so no later
+/// `.unwrap()` can panic on a crafted snapshot.
+fn valid_registry_entry(e: &serde_json::Value) -> bool {
+    e["owner"].is_string()
+        && e["data_hash"].is_string()
+        && e["size"].is_u64()
+        && e["media_type"].is_string()
+        && e["stake"].is_u64()
+        && e["weight"].is_u64()
+        && e["status"].is_string()
+}
+
+/// Likewise for an open challenge, including vote lists that must be arrays of
+/// address strings (resolve/apply iterate and compare them).
+fn valid_challenge(c: &serde_json::Value) -> bool {
+    let str_array = |x: &serde_json::Value| {
+        x.as_array().is_some_and(|a| a.iter().all(|v| v.is_string()))
+    };
+    c["data_id"].is_string()
+        && c["challenger"].is_string()
+        && c["stake"].is_u64()
+        && c["reason"].is_string()
+        && c["expiry"].is_u64()
+        && str_array(&c["votes_for"])
+        && str_array(&c["votes_against"])
 }

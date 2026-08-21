@@ -121,7 +121,14 @@ impl Store {
         let raw = fs::read(self.dir.join("snapshot.bin")).ok()?;
         let state = raw.chunks_exact(8)
             .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
-        let ledger = TokenLedger::from_value(&meta["ledger"]);
+        // a malformed ledger => reject the whole snapshot => full validated replay
+        let ledger = match TokenLedger::from_value(&meta["ledger"]) {
+            Some(l) => l,
+            None => {
+                warn!("snapshot ledger is malformed — ignoring, will full-replay");
+                return None;
+            }
+        };
         Some((meta["hash"].as_str()?.to_string(), meta["height"].as_u64()?, state, ledger))
     }
 
