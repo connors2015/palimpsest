@@ -213,20 +213,28 @@ def main():
         if not a.file or a.stake is None:
             raise SystemExit("submit-data needs --file and --stake")
         import hashlib
+        import os
         from rig.token import DataSubmitTx
+        # stream the hash — corpora are routinely multi-GB and must never be
+        # slurped into memory just to be fingerprinted
+        h = hashlib.sha256()
+        size = 0
         with open(a.file, "rb") as f:
-            blob = f.read()
+            while chunk := f.read(1 << 24):
+                h.update(chunk)
+                size += len(chunk)
         info = _get(a.node, f"/balance?addr={rec['address']}")
         tx = DataSubmitTx(owner_pub=rec["pub"],
-                          data_hash=hashlib.sha256(blob).hexdigest(),
-                          size_bytes=len(blob), media_type=a.media_type,
+                          data_hash=h.hexdigest(),
+                          size_bytes=size, media_type=a.media_type,
                           stake=int(round(a.stake * GRAIN)),
                           nonce=info.get("nonce", 0)).signed(key)
         out = _post(a.node, "/data/submit", {
             "owner_pub": tx.owner_pub, "data_hash": tx.data_hash,
             "size_bytes": tx.size_bytes, "media_type": tx.media_type,
             "stake": tx.stake, "nonce": tx.nonce, "sig": tx.sig.hex()})
-        print(f"data submitted ({len(blob)} bytes, stake {a.stake}): {out}")
+        print(f"data submitted ({size} bytes, hash {tx.data_hash[:16]}…, "
+              f"stake {a.stake}): {out}")
     elif a.cmd == "challenge":
         if not a.data_id or a.stake is None:
             raise SystemExit("challenge needs --data-id and --stake")
