@@ -3,6 +3,19 @@
 *Working codename: Palimpsest (a surface written over many times, whose history stays recoverable). Final name TBD.*
 *Master design document. Each section tracks a task in the project task list; sections are drafted in order and drilled down individually.*
 
+> **Implementation status.** This is the design. For what is actually enforced
+> in the shipping node today versus what is designed or has only its core
+> primitive built, see [`docs/production-readiness.md`](docs/production-readiness.md)
+> and [`docs/internal/threat-model.md`](docs/internal/threat-model.md). In short:
+> all consensus-safety and runtime-hardening properties are implemented and
+> golden-tested; the DA layer, proposer sortition, and capacity-retarget
+> **primitives** are built and golden-tested but not yet wired into block
+> validation; delta scoring, stake/slashing, the threshold-BLS beacon, and
+> fee-bearing inference remain design + simulation. The launch is phased
+> (invite-only → testnet → open mainnet) accordingly. The genesis is trained
+> **from scratch** on-chain (the deterministic-from-seed `client/make_genesis`
+> path); `client/convert_ckpt.py` exists but is **not** used by the ceremony.
+
 ---
 
 ## 1. Overview

@@ -1,0 +1,73 @@
+# Palimpsest — Production Readiness
+
+The go/no-go tracker for the phased launch. Phase 0 = the rig (done). Phase 1 =
+invite-only devnet with known participants. Phase 2 = testnet. Phase 3 = open
+mainnet. This maps every hardening task to its state and gates each phase.
+
+## Legend
+- ✅ implemented + tested in the shipping node
+- 🧪 core/primitive implemented + golden-tested; live integration/validation
+  pending the testnet
+- 📐 designed (rig / whitepaper); not yet in the node
+- ☐ operational item; manifest/script written, applied per-environment
+
+## Consensus safety — ✅ COMPLETE (blocks Phase 1)
+- ✅ Block height linkage (90) · delta-length guard (91) · n_txs/height-0 (95)
+- ✅ Challenge quorum + disinterested jurors (93)
+- ✅ Snapshot ledger validation (94)
+- ✅ Length-prefixed signing preimages (96)
+- ✅ Overflow-safe arithmetic, numpy parity, dust documented (97)
+- Golden vectors: 17 families incl. negative + overflow cases; Rust == Python.
+
+## Runtime & DoS hardening — ✅ COMPLETE (blocks Phase 1)
+- ✅ Bounded mempools/caches + admission gating (98/99)
+- ✅ Admin-token-gated mutating API; balance-before-write upload (100)
+- ✅ Byte-budgeted, continuous sync (101)
+- ✅ Durable fsync persistence; fatal-on-write-fail; torn-line self-heal (102/103)
+- ✅ Single-writer data-dir lock (104)
+- ✅ Gossip peer scoring + tight sync limits (105)
+- ✅ Keys off argv/git, zeroized (106)
+- ✅ Trainer watchdog + clock guard (107)
+- ✅ SIGTERM graceful shutdown → final snapshot (131)
+
+## Trust model — 🧪/📐 (blocks Phase 3; invite-only mitigates for Phase 1/2)
+- 🧪 DA layer primitive: erasure coding + Merkle sampling (`core::da`) (111)
+  - ☐ node routing: disperse on submit, sample on validate, reconstruct on
+    replay (112) — integration + testnet validation
+- 🧪 Proposer sortition primitive: verifiable stake-weighted VRF (`core::lottery`) (113)
+  - ☐ wire eligibility into validate_block + produce; VRF-derived work (92)
+  - 📐 threshold-BLS beacon for unbiasability (`rig/beacon.py`)
+- 🧪 Capacity retarget controller (`core::capacity`) (117)
+  - ☐ enforce the work quota in validate_block
+- 📐 Delta scoring: held-out-shard loss, commit-reveal committee, audit (108)
+- 📐 Stake bonds + slashing for score fraud / DA withholding (109)
+- 📐 Byzantine-robust aggregation at low miner counts (110)
+- 📐 Dtx cross-inclusion (anti-censorship) (114)
+- 📐 Verified fee-bearing inference + receipts (116)
+
+**Phase-1 mitigation:** run invite-only with known miners so the missing delta
+scoring can't be exploited; keep mutating API endpoints token-gated/disabled.
+
+## Operations — ☐ manifests/scripts ready; apply per environment
+- ☐ Persistent-volume StatefulSet (118) · prebuilt image + CI push (120)
+- ✅ Prometheus /metrics endpoint + alert rules (121)
+- ☐ Backup/restore script (122)
+- ☐ TLS termination for non-loopback API (123) — see below
+- ☐ Second bootstrap/DA anchor + failover (119)
+
+## Process
+- ✅ CI: warning-clean build + tests + golden parity; image build (124)
+- 🧪 node/net tests: store lock/torn-line, mempool window, API auth (125) —
+  expand alongside integrations
+- 📐 adversarial/chaos suite (126) · cross-machine e2e + soak (128)
+- ☐ Python reference suite pinned + green in CI (127)
+- ✅ Threat model (132) · this readiness doc (133)
+
+## Phase gates
+- **Phase 1 (invite devnet):** consensus safety ✅ + runtime hardening ✅ +
+  ops applied. → **READY once ops manifests are applied to the cluster.**
+- **Phase 2 (testnet):** DA routing (112) + sortition wiring (92/113) live and
+  converging under churn; e2e/soak (128) green; second anchor (119).
+- **Phase 3 (open mainnet):** delta scoring + stake/slash (108/109/110)
+  enforced; threshold-BLS beacon; **external audit sign-off**; repo public +
+  reproducible checksummed builds.

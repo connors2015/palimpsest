@@ -1,0 +1,92 @@
+# Palimpsest — Threat Model & Security Posture
+
+Status as of the production-hardening pass. This is the brief for the external
+audit (a genesis-ceremony precondition) and the map from each attack to its
+mitigation in the shipping node. It is deliberately honest about what is
+enforced in code today versus what is designed but awaits the testnet phase.
+
+## Assets
+
+1. **Weight integrity** — the chain's state IS the model; corrupting it corrupts
+   the product.
+2. **Token supply** — the emission schedule (halving + sunset) must be the only
+   source of new tokens.
+3. **Ledger correctness** — balances, nonces, staked registry, challenges.
+4. **Liveness** — the chain must keep advancing and converge to one head.
+5. **Data availability** — every accepted delta body must remain retrievable so
+   new nodes can validate from genesis.
+
+## Actors
+
+- **Malicious miner** — submits deltas (any keypair, no permission).
+- **Malicious proposer** — builds blocks (open proposing on mainnet).
+- **Malicious peer** — sends gossip / sync traffic.
+- **Malicious uploader / API caller** — hits the node's HTTP API.
+- **Malicious trainer** — the PyTorch process the node trusts over the local
+  bridge.
+- **Colluding coalition** — multiple of the above under one controller.
+
+## Attack → mitigation
+
+### Consensus safety (enforced in code, golden-tested)
+
+| Attack | Mitigation | Where |
+|---|---|---|
+| Pin a low block height to mint max reward forever | height must equal parent+1 | `blocktree.rs` validate_block (task 90) |
+| Crash every validator with mismatched-length deltas | delta body length must equal model dim, checked before aggregation | `blocktree.rs` (task 91) |
+| Height-0 / n_txs header lies | height-0 rejected; `n_txs` must equal tx count | `blocktree.rs` (task 95) |
+| Seize a staked data entry with one juror vote | challenge quorum (≥3 affirmative) + a strict majority | `token.rs` resolve_expired_challenges (task 93) |
+| Vote on your own challenge (challenger or owner) | disinterested-juror rule | `token.rs` apply_data_tx (task 93) |
+| txid collision via delimiter injection in signed fields | length-prefixed signing preimages | `lib.rs`/`token.rs` `frame` (task 96) |
+| Integer overflow → panic or wrong ledger | numpy-parity `wrapping_add` for state math; `saturating_add` + u128 intermediates for the ledger | `lib.rs`, `token.rs` (task 97) |
+| Malformed fast-boot snapshot panics/​corrupts a node | snapshot ledger fully validated on load; reject → full replay | `token.rs` from_value, `store.rs` (task 94) |
+
+### Runtime / DoS (enforced in code)
+
+| Attack | Mitigation | Where |
+|---|---|---|
+| Unbounded mempool/cache growth → OOM | every pool size-capped with eviction; deltas admitted only within a near-head window; account txs gated by ledger nonce; `seen` is a bounded ring | `node.rs` (tasks 98/99) |
+| Fill the disk via `/upload` | balance checked before writing; endpoint gated by admin token | `node.rs`/`api.rs` (task 100) |
+| Spend the operator's wallet / monopolize the trainer via the API | `/upload` + `/chat` require `Authorization: Bearer` (PALIMPSEST_API_TOKEN); disabled if unset | `api.rs` (task 100) |
+| Force a 512MB allocation via a sync response | request read capped 64KB, response 96MB; serve is byte-budgeted | `node.rs` (tasks 101/105) |
+| Flood max-size gossip messages | gossipsub peer scoring + graylisting | `node.rs` behaviour (task 105) |
+| Strand a lagging node (old 2-block/90s cap) | byte-budgeted serve + continuous re-request | `node.rs` (task 101) |
+| Two processes corrupt one data-dir | exclusive advisory flock on the data-dir | `store.rs` (task 104) |
+| Disk-full silently truncates the chain | append/​payload fsync; block-persist failure is fatal (halt, don't advance); torn-line self-heal, mid-file corruption stops replay loudly | `store.rs`/`node.rs` (tasks 102/103) |
+| Private key visible in `ps`/`/proc` or committed to git | key from `--key-file`/env only, zeroized; k8s Secret, not inline | `main.rs`, deploy (task 106) |
+| Hung trainer silences the node | training-round watchdog resets in-flight | `node.rs` (task 107) |
+| Reschedule wipes the sole seed's chain | StatefulSet + persistent volume | `deploy/seed-node.yaml` (task 118) |
+
+### Trust model (designed; core primitives built + golden-tested; enforcement is testnet-phase)
+
+These are the properties that make "the chain's state is a *trustworthy* model"
+true. The deterministic primitives are implemented and pinned by golden vectors;
+wiring them into block validation + production, and validating their economic
+equilibrium, requires the multi-node testnet (Phase 2).
+
+| Property | Status |
+|---|---|
+| **Delta verification** — a delta must be a real, loss-reducing gradient, scored on a held-out shard via commit-reveal committee, with audit + slash for score fraud | DESIGN + economic sim (`rig/consensus_sim.py`); NOT yet enforced in the node. Until enforced, `trimmed_mean` is the only aggregation defense and degenerates to "trust the miner" at low miner counts — **launch invite-only with known miners.** (tasks 108/109/110) |
+| **Data availability** — erasure-coded shards + Merkle availability sampling so a body is provably retrievable and survives some holders vanishing | PRIMITIVE built + golden-tested (`core::da`); node routing (disperse on submit, sample on validate, reconstruct on replay) is the integration (tasks 111/112) |
+| **Proposer sortition** — verifiable, stake-weighted per-height eligibility instead of fixed rotation | PRIMITIVE built + golden-tested (`core::lottery`, deterministic-Ed25519 VRF); the threshold-BLS beacon (`rig/beacon.py`) is the unbiasable upgrade; wiring into validate_block + produce is the integration (tasks 113/92) |
+| **Capacity retarget** — model size as difficulty | CONTROLLER built + golden-tested (`core::capacity`); quota enforcement in validate_block is the integration (task 117) |
+| **Verified fee-bearing inference** | DESIGN only (task 116) |
+
+## Cross-hardware determinism (holds)
+
+Training float nondeterminism (MPS vs CUDA) occurs BEFORE the consensus
+boundary: each miner quantizes to int64 and commits its own delta (hash-pinned);
+consensus math is pure integer arithmetic (`wrapping_add`, `div_euclid`,
+sorted maps), so two honest nodes reach identical roots regardless of GPU. Pinned
+by 17 golden-vector families, including an overflow case.
+
+## Residual risk / do-not-do
+
+- Do **not** expose an unauthenticated node's mutating endpoints to the open
+  internet; keep `/upload` + `/chat` token-gated (default: disabled).
+- Do **not** launch an OPEN adversarial mainnet before delta scoring + DA
+  routing are enforced and the external audit is complete — run invite-only
+  with known participants (Phase 1/2).
+- The interim VRF sortition is grindable via the parent hash by the proposer;
+  the threshold-BLS beacon closes this and is required before an open, high-value
+  network.
