@@ -1,8 +1,11 @@
 # Palimpsest — Production Readiness
 
 The go/no-go tracker for the phased launch. Phase 0 = the rig (done). Phase 1 =
-invite-only devnet with known participants. Phase 2 = testnet. Phase 3 = open
-mainnet. This maps every hardening task to its state and gates each phase.
+a small, **monitored open devnet** run by known operators (the network is
+permissionless — see [joining.md](joining.md) — so "small" means few people
+bother running nodes yet, not a cryptographic gate). Phase 2 = testnet.
+Phase 3 = open mainnet. This maps every hardening task to its state and gates
+each phase.
 
 ## Legend
 - ✅ implemented + tested in the shipping node
@@ -35,7 +38,7 @@ mainnet. This maps every hardening task to its state and gates each phase.
 - ✅ Trainer watchdog + clock guard (107)
 - ✅ SIGTERM graceful shutdown → final snapshot (131)
 
-## Trust model — 🧪/📐 (blocks Phase 3; invite-only mitigates for Phase 1/2)
+## Trust model — 🧪/📐 (blocks Phase 3; a small monitored devnet mitigates Phase 1/2)
 - 🧪 DA layer primitive: erasure coding + Merkle sampling (`core::da`) (111)
   - ☐ node routing: disperse on submit, sample on validate, reconstruct on
     replay (112) — integration + testnet validation
@@ -47,14 +50,18 @@ mainnet. This maps every hardening task to its state and gates each phase.
 - 📐 Delta scoring: held-out-shard loss, commit-reveal committee, audit (108)
 - ✅ Delta stake bond (admission cost) — lock/return done + golden-tested (109);
   slashing on proven fraud couples to scoring (testnet)
-- 📐 Byzantine-robust aggregation at low miner counts (110)
+- ✅ Byzantine-robust aggregation at low miner counts (110) — trim ≥1 at k≥3
 - 📐 Dtx cross-inclusion (anti-censorship) (114)
 - ✅ Fee-bearing inference receipts (116) — on-chain fee payer→server + receipt
   done + golden-tested; off-chain output attestation is the challenge-market
   extension (testnet)
 
-**Phase-1 mitigation:** run invite-only with known miners so the missing delta
-scoring can't be exploited; keep mutating API endpoints token-gated/disabled.
+**Phase-1 mitigation:** the network is open, so instead of gating *who* joins,
+launch **small and monitored** on a low-value model — run it with people you can
+watch, treat rewards as testnet play, and watch for bad deltas. An attacker
+gains little from a near-worthless early model, and delta scoring (108) closes
+the gap before the model is worth attacking. Keep mutating API endpoints
+token-gated/disabled.
 
 ## Operations — ☐ manifests/scripts ready; apply per environment
 - ☐ Persistent-volume StatefulSet (118) · prebuilt image + CI push (120)
@@ -71,9 +78,8 @@ scoring can't be exploited; keep mutating API endpoints token-gated/disabled.
 - ☐ Python reference suite pinned + green in CI (127)
 - ✅ Threat model (132) · this readiness doc (133)
 
-## Remaining (all Phase-2/3 by nature — need live infra + off-chain compute)
-These 7 cannot be completed-and-validated in a single-machine coding
-environment; the readiness gate for each is the testnet, not a golden vector.
+## Remaining — just 2, both Phase-2/3 by nature (need live compute / a network)
+The readiness gate for each is the testnet, not a golden vector.
 - 108 delta scoring (held-out-shard loss) — needs off-chain model execution; a
   self-reported score without the commit-reveal committee would be gameable, so
   it genuinely gates on the testnet's off-chain verification
@@ -93,12 +99,14 @@ environment; the readiness gate for each is the testnet, not a golden vector.
 - ✅ 116 fee-bearing inference DONE on-chain (see above)
 
 ## Phase gates
-- **Phase 1 (invite devnet): ✅ READY** — consensus safety complete (incl.
-  non-forgeable work + robust aggregation), runtime hardening complete, ops
-  manifests written. Soak (kill/restart) converges. Apply the ops manifests to
-  the cluster to launch.
-- **Phase 2 (testnet):** DA routing (111/112) live and converging under churn;
-  a second anchor (✅ documented, provision it); load/soak on real hosts.
-- **Phase 3 (open mainnet):** delta scoring + stake/slash (108/109) enforced;
-  fee-bearing inference (116); threshold-BLS beacon; **external audit sign-off**;
-  repo public + reproducible checksummed builds.
+- **Phase 1 (small open devnet): ✅ READY** — consensus safety complete (incl.
+  non-forgeable work + robust aggregation), runtime hardening complete,
+  multi-node DA + stake bonds + inference fees done, ops manifests written, repo
+  public, genesis fetchable+verifiable from a peer. Soak (kill/restart) and the
+  genesis-bootstrap test pass. Publish a bootstrap address + genesis id and
+  point testers at [joining.md](joining.md).
+- **Phase 2 (testnet):** multi-node DA availability-sampling under churn; a
+  second anchor (✅ documented, provision it); load/soak on real hosts.
+- **Phase 3 (open mainnet):** delta scoring (108) + slashing enforced;
+  cross-inclusion (114); threshold-BLS beacon for unbiasable sortition;
+  **external audit sign-off**; ✅ repo public + reproducible checksummed builds.

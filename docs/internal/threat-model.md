@@ -66,7 +66,7 @@ equilibrium, requires the multi-node testnet (Phase 2).
 
 | Property | Status |
 |---|---|
-| **Delta verification** — a delta must be a real, loss-reducing gradient, scored on a held-out shard via commit-reveal committee, with audit + slash for score fraud | DESIGN + economic sim (`rig/consensus_sim.py`); NOT yet enforced in the node. Until enforced, `trimmed_mean` is the only aggregation defense and degenerates to "trust the miner" at low miner counts — **launch invite-only with known miners.** (tasks 108/109/110) |
+| **Delta verification** — a delta must be a real, loss-reducing gradient, scored on a held-out shard via commit-reveal committee, with audit + slash for score fraud | DESIGN + economic sim (`rig/consensus_sim.py`); NOT yet enforced in the node. Until enforced, `trimmed_mean` (now trimming ≥1 at k≥3, so robust for ≥3 honest miners) is the aggregation defense — **launch a small, monitored, low-value devnet** rather than a high-value open network. (tasks 108/109/110) |
 | **Data availability** — erasure-coded shards + Merkle availability sampling so a body is provably retrievable and survives some holders vanishing | PRIMITIVE built + golden-tested (`core::da`); node routing (disperse on submit, sample on validate, reconstruct on replay) is the integration (tasks 111/112) |
 | **Proposer sortition** — verifiable, stake-weighted per-height eligibility instead of fixed rotation | PRIMITIVE built + golden-tested (`core::lottery`, deterministic-Ed25519 VRF); the threshold-BLS beacon (`rig/beacon.py`) is the unbiasable upgrade; wiring into validate_block + produce is the integration (tasks 113/92) |
 | **Capacity retarget** — model size as difficulty | CONTROLLER built + golden-tested (`core::capacity`); quota enforcement in validate_block is the integration (task 117) |
@@ -84,9 +84,10 @@ by 17 golden-vector families, including an overflow case.
 
 - Do **not** expose an unauthenticated node's mutating endpoints to the open
   internet; keep `/upload` + `/chat` token-gated (default: disabled).
-- Do **not** launch an OPEN adversarial mainnet before delta scoring + DA
-  routing are enforced and the external audit is complete — run invite-only
-  with known participants (Phase 1/2).
+- Do **not** launch a high-value mainnet before delta scoring is enforced and
+  the external audit is complete. The network is open, so mitigate by keeping the
+  early devnet **small, monitored, and low-value** (Phase 1/2) — an attacker
+  gains little from a near-worthless early model.
 - The interim VRF sortition is grindable via the parent hash by the proposer;
   the threshold-BLS beacon closes this and is required before an open, high-value
   network.

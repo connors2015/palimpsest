@@ -20,7 +20,9 @@ minted by verifiable work.
 > multi-node data availability, the stake-bond admission cost, and fee-bearing
 > inference are implemented and pinned to the reference by golden vectors. Delta
 > loss-scoring, cross-inclusion, and the threshold-BLS beacon remain testnet-phase
-> (they need live compute + a running network). Launch is phased: invite-only
+> (they need live compute + a running network). The network is **open** — anyone
+> can join from one peer address + the published genesis id (see
+> **[docs/joining.md](docs/joining.md)**). Launch is phased: a small monitored
 > devnet → testnet → open mainnet.
 
 ## The map
