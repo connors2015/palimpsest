@@ -342,3 +342,26 @@ fn da_matches_reference() {
                 "a forged shard must fail its Merkle proof");
     }
 }
+
+#[test]
+fn capacity_retarget_matches_reference() {
+    use palimpsest_core::capacity::CapacityRetarget;
+    for case in vectors()["capacity"].as_array().unwrap() {
+        let mut ctrl = CapacityRetarget::default();
+        for w in case["windows"].as_array().unwrap() {
+            let accepted = w["accepted"].as_u64().unwrap();
+            let staleness = w["staleness"].as_f64().unwrap();
+            let d = ctrl.observe_window(accepted, staleness);
+            // the consensus-relevant outputs (module counts + events) must match
+            // EXACTLY; the quota control signal within a tight epsilon.
+            assert_eq!(d.window, w["window"].as_u64().unwrap());
+            assert_eq!(d.grew, w["grew"].as_u64().unwrap(), "grew @w{}", d.window);
+            assert_eq!(d.froze, w["froze"].as_u64().unwrap(), "froze @w{}", d.window);
+            assert_eq!(d.thawed, w["thawed"].as_u64().unwrap(), "thawed @w{}", d.window);
+            assert_eq!(d.total, w["total"].as_u64().unwrap(), "total @w{}", d.window);
+            assert_eq!(d.active, w["active"].as_u64().unwrap(), "active @w{}", d.window);
+            assert!((d.quota - w["quota"].as_f64().unwrap()).abs() < 1e-6,
+                    "quota @w{}: {} vs {}", d.window, d.quota, w["quota"]);
+        }
+    }
+}

@@ -954,6 +954,177 @@
    ]
   }
  ],
+ "capacity": [
+  {
+   "windows": [
+    {
+     "accepted": 8,
+     "staleness": 0.0,
+     "window": 1,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.0,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 9,
+     "staleness": 0.0,
+     "window": 2,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.0312,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 11,
+     "staleness": 0.0,
+     "window": 3,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.1279,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 14,
+     "staleness": 0.0,
+     "window": 4,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.3394,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 11,
+     "staleness": 0.0,
+     "window": 5,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.465,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 10,
+     "staleness": 0.0,
+     "window": 6,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.5565,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 10,
+     "staleness": 0.0,
+     "window": 7,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.6538,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 9,
+     "staleness": 0.0,
+     "window": 8,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.7055,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 0,
+     "staleness": 1.0,
+     "window": 9,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.3416,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 0,
+     "staleness": 1.0,
+     "window": 10,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.0687,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 0,
+     "staleness": 1.0,
+     "window": 11,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 0.864,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 0,
+     "staleness": 1.0,
+     "window": 12,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 0.7105,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 11,
+     "staleness": 0.0,
+     "window": 13,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 0.7771,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 15,
+     "staleness": 0.0,
+     "window": 14,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 0.9471,
+     "total": 4,
+     "active": 4
+    },
+    {
+     "accepted": 16,
+     "staleness": 0.0,
+     "window": 15,
+     "grew": 0,
+     "froze": 0,
+     "thawed": 0,
+     "quota": 1.1839,
+     "total": 4,
+     "active": 4
+    }
+   ]
+  }
+ ],
  "chain_replay": [
   {
    "genesis_w": [

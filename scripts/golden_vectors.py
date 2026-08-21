@@ -227,6 +227,22 @@ def main():
         "proof": [[side, sib.hex()] for side, sib in pf],
     }]
 
+    # --- capacity retarget (§9.4a): the deterministic decision trace ----------
+    from rig.capacity import CapacityRetarget
+    ctrl = CapacityRetarget()
+    fleet = [1.0, 1.2, 1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 0.5, 0.3, 0.3, 0.3, 1.0, 1.5, 2.0]
+    mpfu, per_unit = 4.0, 8.0
+    cap_windows = []
+    for f in fleet:
+        capacity = f * per_unit
+        accepted = int(capacity / max(ctrl.quota, 1e-9))
+        load = ctrl.active_modules / (mpfu * max(f, 1e-9))
+        staleness = max(0.0, min(1.0, load - 1.0))
+        accepted = int(accepted * (1.0 - staleness))
+        dec = ctrl.observe_window(accepted, staleness)
+        cap_windows.append({"accepted": accepted, "staleness": staleness, **dec})
+    v["capacity"] = [{"windows": cap_windows}]
+
     # --- FULL-CHAIN REPLAY: a mini chain with a fork and settled transfers ----
     # Rust must rebuild every block, validate it completely (sigs, state
     # transition, txset/transfer/ledger roots), run fork choice, and land on the
