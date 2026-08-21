@@ -53,6 +53,10 @@ struct Args {
     api_port: u16,
     #[arg(long, default_value = "0.0.0.0")]
     api_bind: String,        // interface for the HTTP API/dashboard
+    #[arg(long, default_value = "0.0.0.0")]
+    listen_bind: String,     // p2p listen interface; pin to one NIC (e.g. the
+                             // LAN IP) on hosts with docker/k8s/libvirt bridges
+                             // so libp2p stops advertising unreachable addrs
     #[arg(long, default_value_t = 7999)]
     bridge_port: u16,
     #[arg(long, default_value = "")]
@@ -247,8 +251,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let topic = libp2p::gossipsub::IdentTopic::new("palimpsest/v1");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-    swarm.listen_on(format!("/ip4/0.0.0.0/udp/{}/quic-v1", args.port).parse::<Multiaddr>()?)?;
-    swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", args.port).parse::<Multiaddr>()?)?;
+    swarm.listen_on(format!("/ip4/{}/udp/{}/quic-v1", args.listen_bind, args.port).parse::<Multiaddr>()?)?;
+    swarm.listen_on(format!("/ip4/{}/tcp/{}", args.listen_bind, args.port).parse::<Multiaddr>()?)?;
     if !args.external_address.is_empty() {
         match args.external_address.parse::<Multiaddr>() {
             Ok(a) => swarm.add_external_address(a),
