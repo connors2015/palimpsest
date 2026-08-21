@@ -61,6 +61,10 @@ class Header:
     # so consensus stays deterministic across GPUs; truthfulness is bonded and
     # challengeable (the commit-reveal committee is the testnet upgrade).
     score_root: str = ""
+    # INFLUENCE SKETCHES (rev 8): commitment to each delta's quantized gradient
+    # projection — the corpus-attribution primitive (§8). Same committed-inputs
+    # trust tier as scores; recomputable from the DA delta body + public seed.
+    sketch_root: str = ""
 
     def block_hash(self) -> str:
         return _sha(json.dumps(self.__dict__, sort_keys=True).encode())
@@ -70,12 +74,35 @@ class Header:
 # clamped by consensus so a lying proposer can't mint unbounded weight.
 SCORE_CAP = 10**9
 
+# rev 8: each delta carries its INFLUENCE SKETCH — the gradient projected
+# through the shared seeded ±1/√d matrix (attribution.py Projector), quantized.
+# A corpus's accumulated sketch is then pure ledger arithmetic (Σ sketches of
+# the deltas that named it), recomputable from DA delta bodies + the public
+# seed — so usage royalties are independently checkable and challengeable.
+SKETCH_DIM = 256
+SKETCH_SEED = 1234                 # the published projection seed (Projector)
+SKETCH_SCALE = 10_000              # fixed-point quantization of sketch entries
+I32 = 2**31                        # per-entry bound for a committed delta sketch
+I64_MAX = 2**63 - 1                # saturating bound for ledger accumulators
+
 
 def scores_root(scores: dict) -> str:
     """Canonical commitment to {txid: score}: sorted compact JSON, hashed."""
     blob = json.dumps({k: int(v) for k, v in scores.items()},
                       sort_keys=True, separators=(",", ":")).encode()
     return _sha(blob)
+
+
+def sketch_root(sketches: dict) -> str:
+    """Canonical commitment to {txid: [int; SKETCH_DIM]}: sorted compact JSON."""
+    blob = json.dumps({k: [int(x) for x in v] for k, v in sketches.items()},
+                      sort_keys=True, separators=(",", ":")).encode()
+    return _sha(blob)
+
+
+def _sat64(x: int) -> int:
+    """Saturate to i64 — accumulators must stay in the Rust mirror's range."""
+    return max(-I64_MAX - 1, min(I64_MAX, x))
 
 
 def effective_scores(txs: list, scores: dict) -> dict:
@@ -97,6 +124,7 @@ class Block:
     transfers: list = field(default_factory=list)   # list[TransferTx]
     data_txs: list = field(default_factory=list)    # rev 3: Data{Submit,Challenge,Vote}Tx
     scores: dict = field(default_factory=dict)      # rev 7: txid -> micro-nat score
+    sketches: dict = field(default_factory=dict)    # rev 8: txid -> [int; SKETCH_DIM]
 
     @property
     def hash(self) -> str:
@@ -146,12 +174,26 @@ def apply_ledger(parent_ledger: TokenLedger, block: Block,
     data_credits: dict[str, int] = {}
     active_set = {e["data_hash"] for e in led.registry.values()
                   if e["status"] == "active" and e["weight"] > 0}
+    hash_to_entry = {e["data_hash"]: e for e in led.registry.values()
+                     if e["status"] == "active"}
     for tx in block.txs:
         s = eff[tx.txid()]
         miner_weights[tx.miner] = miner_weights.get(tx.miner, 0) + s
         named = [r for r in tx.canonical_refs() if r in active_set]
         for r in named:
             data_credits[r] = data_credits.get(r, 0) + s * 10_000 // len(named)
+        # rev 8: accrue this delta's committed influence sketch onto the corpora
+        # it named — a corpus's ledger sketch = Σ (its deltas' sketches), the
+        # projection of its total contribution to the weights. Saturating i64
+        # so the Rust mirror can never overflow/diverge.
+        sk = block.sketches.get(tx.txid())
+        if sk and any(sk):
+            named_e = [hash_to_entry[r] for r in tx.canonical_refs()
+                       if r in hash_to_entry]
+            for e in named_e:
+                acc = e.get("sketch") or [0] * SKETCH_DIM
+                e["sketch"] = [_sat64(a + x * 10_000 // len(named_e))
+                               for a, x in zip(acc, sk)]
     led.apply_reward(h, miner_pubs=[tx.miner for tx in block.txs],
                      proposer_pub=block.header.proposer,
                      data_credits=data_credits,
@@ -243,6 +285,18 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
             raise ValidationError(f"score out of range for {k[:8]}")
     if scores_root(block.scores) != h.score_root:
         raise ValidationError("score_root mismatch")
+    # 2c. INFLUENCE SKETCHES (rev 8): one committed sketch per included tx,
+    #     SKETCH_DIM ints each within i32 (an all-zero sketch = "unsketched",
+    #     contributing nothing to attribution), and the commitment reproduces.
+    if set(block.sketches.keys()) != txids:
+        raise ValidationError("sketches must cover exactly the included txs")
+    for k, v in block.sketches.items():
+        if len(v) != SKETCH_DIM or any(
+                not isinstance(x, int) or isinstance(x, bool)
+                or not -I32 <= x < I32 for x in v):
+            raise ValidationError(f"sketch malformed for {k[:8]}")
+    if sketch_root(block.sketches) != h.sketch_root:
+        raise ValidationError("sketch_root mismatch")
     # 3. the state transition reproduces the committed root (deterministic, §3.4)
     deltas = [block.bodies[tx.da_pointer] for tx in block.txs]
     w = parent_w_int + trimmed_mean_int(deltas) if deltas else parent_w_int.copy()
@@ -375,7 +429,8 @@ class BlockTree:
 def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
                 works: dict, proposer_key, transfers: list | None = None,
                 data_txs: list | None = None,
-                scores: dict | None = None) -> Block:
+                scores: dict | None = None,
+                sketches: dict | None = None) -> Block:
     """Assemble a valid block extending `parent_hash` from accepted txs, plus the
     transfer lane (rev 2), the data lane (rev 3), the proposer's VRF proof
     (rev 4), and the proposer's committed delta scores (rev 7 — omitted scores
@@ -390,15 +445,19 @@ def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
     w = parent_w + trimmed_mean_int(deltas) if deltas else parent_w.copy()
     vrf_proof = lottery.vrf_prove(proposer_key, parent_hash, height)
     blk_scores = {t.txid(): int((scores or {}).get(t.txid(), 0)) for t in accepted}
+    blk_sketches = {t.txid(): [int(x) for x in
+                               (sketches or {}).get(t.txid(), [0] * SKETCH_DIM)]
+                    for t in accepted}
     header = Header(
         height=height,
         prev_hash=parent_hash, state_root=state_root(w),
         txset_root=txset_root(accepted), n_txs=len(accepted),
         work=lottery.vrf_work(vrf_proof), proposer=proposer_key.pub,
-        vrf_proof=vrf_proof.hex(), score_root=scores_root(blk_scores))
+        vrf_proof=vrf_proof.hex(), score_root=scores_root(blk_scores),
+        sketch_root=sketch_root(blk_sketches))
     block = Block(header, accepted,
                   {t.da_pointer: bodies[t.da_pointer] for t in accepted},
-                  transfers, data_txs, blk_scores)
+                  transfers, data_txs, blk_scores, blk_sketches)
     # commit the full token transition into the header
     header.transfer_root = xfer_root(transfers)
     header.data_root = dta_root(data_txs)

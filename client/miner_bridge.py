@@ -142,22 +142,32 @@ def run(a):
                         continue
                     gen = torch.Generator().manual_seed(int(msg.get("seed", 0)))
                     xb, yb = data.get_batch("val", a.batch, generator=gen)
-                    scores = {}
+                    scores, sketches = {}, {}
                     model.eval()
                     with torch.no_grad():
                         _, base_loss = model(xb, yb)
                         base = float(base_loss)
                         for d in msg.get("deltas", []):
-                            cand = state + _sparse_dense(d["sparse"])
+                            sp = d["sparse"]
+                            cand = state + _sparse_dense(sp)
                             set_flat_params(model, dequantize(cand))
                             _, l = model(xb, yb)
                             scores[d["txid"]] = max(
                                 0, int(round((base - float(l)) * 1e6)))
+                            # rev 8: the delta's integer influence sketch —
+                            # exactly recomputable from the DA body by anyone
+                            from rig.sketch import sketch_sparse
+                            idx = np.frombuffer(base64.b64decode(sp["idx"]),
+                                                dtype="<u4")
+                            val = np.frombuffer(base64.b64decode(sp["val"]),
+                                                dtype="<i8")
+                            sketches[d["txid"]] = sketch_sparse(
+                                idx.tolist(), val.tolist())
                         set_flat_params(model, dequantize(state))  # restore head
                     model.train()
                     _send(sock, {"t": "scores", "height": height,
-                                 "scores": scores})
-                    print(f"h{height}: scored {len(scores)} deltas "
+                                 "scores": scores, "sketches": sketches})
+                    print(f"h{height}: scored+sketched {len(scores)} deltas "
                           f"(base loss {base:.3f})", flush=True)
                 elif t == "generate":
                     # serve chat from the chain-synced model (works on any

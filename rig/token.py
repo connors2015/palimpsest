@@ -215,12 +215,22 @@ class InferenceReceiptTx:
     output_hash: str               # sha256 of the served output bytes
     head_root: str                 # the weights-state root it was served against
     nonce: int
+    # rev 8: the ANSWER SKETCH — the emitted answer's loss-gradient projected
+    # through the shared seeded matrix (attribution §8), quantized. The data
+    # slice of the fee splits across corpora by positive alignment with their
+    # accumulated ledger sketches. Empty = unsketched → the slice pools as
+    # before. Committed in the payer's signature, recomputable from the output
+    # + the head_root model — a challengeable server claim.
+    answer_sketch: list = None
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
+        sk = [int(x) for x in (self.answer_sketch or [])]
+        import json as _json
         return frame(b"inference", self.payer_pub.encode(), self.server_addr.encode(),
                      str(self.fee).encode(), self.output_hash.encode(),
-                     self.head_root.encode(), str(self.nonce).encode())
+                     self.head_root.encode(), str(self.nonce).encode(),
+                     _json.dumps(sk, separators=(",", ":")).encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()
@@ -460,8 +470,33 @@ class TokenLedger:
             data_cut = tx.fee * FEE_SHARE_DATA // 10_000
             train_cut = tx.fee * FEE_SHARE_TRAIN // 10_000
             self._credit(tx.server_addr, tx.fee - data_cut - train_cut)
-            self.fee_data_pool += data_cut
             self.fee_train_pool += train_cut
+            # rev 8 USAGE ATTRIBUTION: if the receipt carries an answer sketch,
+            # the data slice pays the corpora whose accumulated ledger sketches
+            # POSITIVELY align with it (∝ dot product — data that pushed against
+            # the answer earns nothing), directly, this receipt. Unsketched
+            # receipts / no positive alignment → the slice pools as before.
+            # Deterministic integer arithmetic; big-int dots (Rust: i128).
+            paid_direct = False
+            ans = [int(x) for x in (tx.answer_sketch or [])]
+            if any(ans):
+                aligns = {}
+                for e in self.registry.values():
+                    if e["status"] != "active":
+                        continue
+                    sk = e.get("sketch")
+                    if not sk:
+                        continue
+                    d = sum(a * b for a, b in zip(sk, ans))
+                    if d > 0:
+                        aligns[e["owner"]] = aligns.get(e["owner"], 0) + d
+                total = sum(aligns.values())
+                if total > 0:
+                    for owner in sorted(aligns):           # canonical, dust burned
+                        self._credit(owner, data_cut * aligns[owner] // total)
+                    paid_direct = True
+            if not paid_direct:
+                self.fee_data_pool += data_cut
         else:
             return False
         self.nonces[src] = tx.nonce + 1
