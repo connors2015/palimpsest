@@ -9,3 +9,6 @@ wallet.json
 *.wallet
 data/
 runs/
+corpus/
+corpus_mac/
+*.bin
