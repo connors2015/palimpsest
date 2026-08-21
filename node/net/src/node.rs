@@ -411,6 +411,24 @@ impl Node {
         let led = self.tree.head_ledger();
         json!({"registry": led.registry, "challenges": led.challenges})
     }
+
+    fn api_chain(&self) -> Value {
+        // the last 16 headers along the head lineage, oldest first
+        let mut out = Vec::new();
+        let mut cur = self.tree.head.clone();
+        for _ in 0..16 {
+            if cur == self.tree.genesis_hash {
+                break;
+            }
+            let h = &self.tree.blocks[&cur];
+            out.push(json!({"height": h.height, "hash": cur,
+                            "proposer": h.proposer, "n_txs": h.n_txs,
+                            "work": h.work}));
+            cur = h.prev_hash.clone();
+        }
+        out.reverse();
+        json!({"blocks": out})
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +563,7 @@ pub async fn run(
                 ApiCmd::Status(o) => { let _ = o.send(node.api_status()); }
                 ApiCmd::Balance(addr, o) => { let _ = o.send(node.api_balance(&addr)); }
                 ApiCmd::Registry(o) => { let _ = o.send(node.api_registry()); }
+                ApiCmd::Chain(o) => { let _ = o.send(node.api_chain()); }
                 ApiCmd::SubmitAccountTx(v, o) => {
                     let reply = match account_tx_from_json(&v) {
                         None => json!({"ok": false, "error": "malformed tx"}),
