@@ -29,3 +29,4 @@ argon2 = "0.5"
 crypto_secretbox = "0.1"
 async-trait = "0.1"
 futures = "0.3"
+libc = "0.2"          # advisory flock on the data dir (single-writer guarantee)

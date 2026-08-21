@@ -17,6 +17,7 @@ use palimpsest_core::token::TokenLedger;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -27,13 +28,35 @@ type Rebuilt = (BlockTree, HashMap<String, StoredBlock>, HashMap<String, Payload
 
 pub struct Store {
     dir: PathBuf,
+    /// Held for the process lifetime: an advisory flock on the data dir. The
+    /// kernel releases it automatically when the process exits (fd closed), so a
+    /// crash never leaves a stale lock. Two processes on one --data-dir would
+    /// interleave appends into blocks.jsonl and corrupt the chain.
+    _lock: fs::File,
 }
 
 impl Store {
     pub fn open(dir: &str) -> std::io::Result<Store> {
         let dir = PathBuf::from(dir);
         fs::create_dir_all(dir.join("payloads"))?;
-        Ok(Store { dir })
+        let lock = Self::acquire_lock(&dir)?;
+        Ok(Store { dir, _lock: lock })
+    }
+
+    /// Take an exclusive, non-blocking advisory lock on `<dir>/.lock`. Fails
+    /// with a clear error if another node process already holds it.
+    fn acquire_lock(dir: &PathBuf) -> std::io::Result<fs::File> {
+        let path = dir.join(".lock");
+        let file = fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path)?;
+        // SAFETY: valid fd for the lifetime of `file`; LOCK_NB never blocks.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("another palimpsest-node already holds {}", path.display()),
+            ));
+        }
+        Ok(file)
     }
 
     // ---- genesis ---------------------------------------------------------
@@ -63,11 +86,29 @@ impl Store {
     }
 
     // ---- payloads --------------------------------------------------------
-    pub fn put_payload(&self, txid: &str, p: &Payload) {
+    /// Persist a payload (idempotent). Written to a temp file + rename so a
+    /// crash can't leave a half-written body that get_payload would accept, and
+    /// fsync'd for durability. Returns whether it is now on disk — the caller
+    /// (which drops the in-memory copy once a delta is mined) must not discard
+    /// memory if this reports false.
+    pub fn put_payload(&self, txid: &str, p: &Payload) -> bool {
         let path = self.dir.join("payloads").join(format!("{txid}.json"));
-        if !path.exists() {
-            let _ = fs::write(path, serde_json::to_vec(p).unwrap());
+        if path.exists() {
+            return true;
         }
+        let tmp = self.dir.join("payloads").join(format!("{txid}.json.tmp"));
+        let write = (|| -> std::io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&serde_json::to_vec(p).unwrap())?;
+            f.sync_all()?;
+            fs::rename(&tmp, &path)
+        })();
+        if let Err(e) = write {
+            warn!(%txid, "failed to persist payload: {e}");
+            let _ = fs::remove_file(&tmp);
+            return false;
+        }
+        true
     }
 
     pub fn get_payload(&self, txid: &str) -> Option<Payload> {
@@ -82,17 +123,61 @@ impl Store {
     }
 
     // ---- block log -------------------------------------------------------
+    /// Append + fsync a block. fsync makes the record durable across power loss;
+    /// the caller MUST treat an Err as fatal (a dropped write silently truncates
+    /// the chain on the next boot).
     pub fn append_block(&self, b: &StoredBlock) -> std::io::Result<()> {
         let mut f = fs::OpenOptions::new().create(true).append(true)
             .open(self.dir.join("blocks.jsonl"))?;
-        writeln!(f, "{}", serde_json::to_string(b).unwrap())
+        writeln!(f, "{}", serde_json::to_string(b).unwrap())?;
+        f.sync_all()
     }
 
+    /// Read the block log, tolerating a torn final record (a crash mid-append)
+    /// by self-healing: truncate to the last good line. A corrupt record in the
+    /// MIDDLE is real corruption — stop there and warn loudly rather than
+    /// silently skipping it (skipping would orphan every block after it).
     pub fn read_blocks(&self) -> Vec<StoredBlock> {
         let Ok(raw) = fs::read_to_string(self.dir.join("blocks.jsonl")) else {
             return vec![];
         };
-        raw.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+        let lines: Vec<&str> = raw.split('\n').collect();
+        let mut out = Vec::new();
+        let mut good_bytes = 0usize; // byte length of the fully-valid prefix
+        for (i, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                if i + 1 == lines.len() {
+                    break; // trailing "" after the final newline — clean EOF
+                }
+                good_bytes += 1; // a blank line's '\n'
+                continue;
+            }
+            match serde_json::from_str::<StoredBlock>(line) {
+                Ok(b) => {
+                    out.push(b);
+                    good_bytes += line.len() + 1; // + the '\n'
+                }
+                Err(e) => {
+                    let more_after = lines[i + 1..].iter().any(|l| !l.is_empty());
+                    if more_after {
+                        warn!(line = i, err = %e,
+                              "corrupt block record mid-log — replay stops here");
+                    } else {
+                        warn!(line = i, "torn final block record — truncating to last good line");
+                        let _ = self.truncate_blocks(good_bytes);
+                    }
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn truncate_blocks(&self, len: usize) -> std::io::Result<()> {
+        let f = fs::OpenOptions::new().write(true)
+            .open(self.dir.join("blocks.jsonl"))?;
+        f.set_len(len as u64)?;
+        f.sync_all()
     }
 
     // ---- snapshots -------------------------------------------------------
@@ -256,5 +341,71 @@ impl Store {
         info!(height = tree.blocks[&tree.head].height, blocks = index.len(),
               "full validated replay from genesis");
         Some((tree, index, cache))
+    }
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("palimpsest-store-test-{}-{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    fn block_line(height: u64) -> String {
+        let hdr = format!(
+            "{{\"height\":{height},\"prev_hash\":\"00\",\"state_root\":\"aa\",\
+\"txset_root\":\"bb\",\"n_txs\":0,\"work\":1,\"proposer\":\"p\",\
+\"transfer_root\":\"\",\"ledger_root\":\"\",\"data_root\":\"\"}}");
+        format!("{{\"header\":{hdr},\"txs\":[],\"transfers\":[],\"data_txs\":[]}}")
+    }
+
+    #[test]
+    fn data_dir_lock_is_exclusive() {
+        let dir = tmpdir("lock");
+        let s1 = Store::open(dir.to_str().unwrap()).expect("first open ok");
+        assert!(Store::open(dir.to_str().unwrap()).is_err(),
+                "a second open of the same data-dir must be rejected");
+        drop(s1); // releasing the lock lets a fresh process take it
+        assert!(Store::open(dir.to_str().unwrap()).is_ok(),
+                "open after release must succeed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_blocks_recovers_from_torn_final_line() {
+        let dir = tmpdir("torn");
+        let store = Store::open(dir.to_str().unwrap()).unwrap();
+        // two good records + a torn final line, exactly as a crash mid-append leaves
+        let path = dir.join("blocks.jsonl");
+        let content = format!("{}\n{}\n{}",
+            block_line(1), block_line(2), r#"{"ZZZTORN":{"height":3,"#);
+        fs::write(&path, &content).unwrap();
+        let blocks = store.read_blocks();
+        assert_eq!(blocks.len(), 2, "recovers the two good records");
+        assert_eq!(blocks[0].header.height, 1);
+        assert_eq!(blocks[1].header.height, 2);
+        // the torn tail was self-healed off disk
+        assert!(!fs::read_to_string(&path).unwrap().contains("ZZZTORN"),
+                "torn line must be truncated from disk");
+        assert_eq!(store.read_blocks().len(), 2, "re-read is clean");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_blocks_stops_at_midfile_corruption() {
+        let dir = tmpdir("corrupt");
+        let store = Store::open(dir.to_str().unwrap()).unwrap();
+        // a corrupt record with a VALID record after it => real corruption:
+        // stop at the corruption rather than silently skipping it.
+        let content = format!("{}\n{}\n{}\n",
+            block_line(1), "{not json}", block_line(3));
+        fs::write(dir.join("blocks.jsonl"), &content).unwrap();
+        let blocks = store.read_blocks();
+        assert_eq!(blocks.len(), 1, "stops at the corrupt middle line");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -2321,6 +2321,7 @@ dependencies = [
  "crypto_secretbox",
  "futures",
  "hex",
+ "libc",
  "libp2p",
  "palimpsest-core",
  "rand 0.8.7",

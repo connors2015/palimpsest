@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub const INCLUDE_K: usize = 8;
 
@@ -444,14 +444,26 @@ impl Node {
         let old_head = self.tree.head.clone();
         match self.tree.add_block(block) {
             Ok(_) => {
-                let _ = self.store.append_block(&sb);
+                // DURABILITY: a dropped block write silently truncates the chain
+                // on the next boot, so a persist failure is fatal — halt loudly
+                // and let the operator fix the disk and restart (replay recovers
+                // the last durably-persisted head).
+                if let Err(e) = self.store.append_block(&sb) {
+                    error!("FATAL: cannot persist block h{}: {e}; halting to avoid \
+                            silent chain truncation", sb.header.height);
+                    std::process::exit(1);
+                }
                 for t in &sb.txs {
                     if let Some(tc) = t.to_core() {
                         let id = tc.txid();
                         self.delta_pool.remove(&id);
-                        // the payload is now persisted inside the block (on disk);
-                        // drop the in-memory copy — sync/replay read it from disk.
-                        self.payloads.remove(&id);
+                        // drop the in-memory payload only once it is confirmed on
+                        // disk (the block references it; sync/replay read it back).
+                        if let Some(p) = self.payloads.get(&id) {
+                            if self.store.put_payload(&id, p) {
+                                self.payloads.remove(&id);
+                            }
+                        }
                     }
                 }
                 for v in sb.transfers.iter().chain(sb.data_txs.iter()) {
@@ -737,7 +749,12 @@ pub async fn run(
                             let bh = stored.hash();
                             match node.tree.add_block(block) {
                                 Ok(_) => {
-                                    let _ = node.store.append_block(&stored);
+                                    // durability: never gossip a block we didn't persist
+                                    if let Err(e) = node.store.append_block(&stored) {
+                                        error!("FATAL: cannot persist our block h{}: {e}; \
+                                                halting", stored.header.height);
+                                        std::process::exit(1);
+                                    }
                                     for t in &stored.txs {
                                         if let Some(tc) = t.to_core() {
                                             node.delta_pool.remove(&tc.txid());
