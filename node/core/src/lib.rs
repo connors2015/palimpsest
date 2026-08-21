@@ -13,6 +13,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 pub mod blocktree;
+pub mod da;
 pub mod token;
 
 pub const SCALE: f64 = 65536.0; // 1 << 16 fixed-point scale

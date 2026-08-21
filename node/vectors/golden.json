@@ -906,6 +906,54 @@
    "data_root_of_all": "e12d2dd8b5bc3e69410fb4ffcf35bbff17dc8ff87ab0aec9b36b07d46b4a48fb"
   }
  ],
+ "da": [
+  {
+   "body_hex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8",
+   "k": 4,
+   "n": 12,
+   "orig_len": 100,
+   "shards_hex": [
+    "c0cca08c80444004005c405c8084c0c4000ce0ccc084804440",
+    "6360dd7d0c325fa9d0438ee5b4f7d1ba3231ac97e68ee3f58c",
+    "c0d428377bfaae0440e4683c204c431f6c78c480cc7b2f9eda",
+    "dbb5578b6eb31a9d7003462582da2e7d0967fecc2915bc6a87",
+    "434465edb70012ce9ca61be1c45d39fb9493a9792363719dcf",
+    "96628d447c80e484b4bdb8624f5639c33bcf9b7d4574100f3f",
+    "6ee1fbfc4d99704af3a10a734ab019488b04c59b2ae50c73ca",
+    "9a3f878aae0f3cd5f91850f6a8a67781ec493c73575f6c3519",
+    "b5f607aebf9a9830290e838e1a8cf0a5befda189987775938a",
+    "14f63f3ebbc94b7df0b60159afd1243c9c7ebaa5204ac8dc51",
+    "5b4dfbc442f673058b193df45e9a9415e3f52e0c8a8500f17f",
+    "311f713ed7b90730d1d68c52161153fd230d3530d9398740a1"
+   ],
+   "root_hex": "b42a6a5cc41c1d7c30dc35cd5a935247616c665c60af0a46018b25203d89423d",
+   "reconstruct_from": [
+    1,
+    3,
+    6,
+    9
+   ],
+   "proof_index": 5,
+   "proof": [
+    [
+     "L",
+     "d4f9bdb47a17c1ec026dedd8ba3dc02bcc4052131d4d99f6a620e9299a2ef8cb"
+    ],
+    [
+     "R",
+     "b6cfcae26054fe2922c7930467954660dfa03979f59c0f23bd3c53afb56c40d3"
+    ],
+    [
+     "L",
+     "f6e2b4386b8e5ad5cae78595b202782894433c2e78bfbf324b5248dad6c85026"
+    ],
+    [
+     "R",
+     "6a1994cad0575e5e8dfc57777fb1e847f347592e3ac33cdee3dd7634087ccb1a"
+    ]
+   ]
+  }
+ ],
  "chain_replay": [
   {
    "genesis_w": [

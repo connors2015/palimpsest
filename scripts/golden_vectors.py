@@ -209,6 +209,24 @@ def main():
         "data_root_of_all": data_root([sub, ch] + votes),
     }]
 
+    # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----
+    from rig import da as _da
+    da_body = bytes((i * 7 + 3) % 256 for i in range(100))
+    da_k, da_n = 4, 12
+    blob = _da.disperse(da_body, da_k, da_n)
+    keep = [1, 3, 6, 9]                                   # an arbitrary k-subset
+    recon = _da.reconstruct({i: blob.shards[i] for i in keep}, da_k, blob.orig_len)
+    assert recon == da_body, "reference reconstruct must round-trip"
+    pf = blob.proof(5)
+    v["da"] = [{
+        "body_hex": da_body.hex(), "k": da_k, "n": da_n, "orig_len": len(da_body),
+        "shards_hex": [s.hex() for s in blob.shards],
+        "root_hex": blob.root.hex(),
+        "reconstruct_from": keep,
+        "proof_index": 5,
+        "proof": [[side, sib.hex()] for side, sib in pf],
+    }]
+
     # --- FULL-CHAIN REPLAY: a mini chain with a fork and settled transfers ----
     # Rust must rebuild every block, validate it completely (sigs, state
     # transition, txset/transfer/ledger roots), run fork choice, and land on the

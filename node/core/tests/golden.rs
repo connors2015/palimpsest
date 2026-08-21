@@ -298,3 +298,47 @@ fn full_chain_replay_matches_reference() {
                    case["expected_head_height"].as_u64().unwrap());
     }
 }
+
+#[test]
+fn da_matches_reference() {
+    use palimpsest_core::da;
+    use std::collections::BTreeMap;
+    for case in vectors()["da"].as_array().unwrap() {
+        let body = hex::decode(case["body_hex"].as_str().unwrap()).unwrap();
+        let k = case["k"].as_u64().unwrap() as usize;
+        let n = case["n"].as_u64().unwrap() as usize;
+
+        // erasure shards reproduce byte-for-byte
+        let shards = da::encode(&body, k, n);
+        let want: Vec<Vec<u8>> = case["shards_hex"].as_array().unwrap().iter()
+            .map(|s| hex::decode(s.as_str().unwrap()).unwrap()).collect();
+        assert_eq!(shards, want, "erasure shards must match the reference");
+
+        // Merkle root matches
+        let blob = da::disperse(&body, k, n);
+        assert_eq!(hex::encode(blob.root()), case["root_hex"].as_str().unwrap());
+
+        // reconstruct from the reference's k-subset equals the body
+        let keep: Vec<usize> = case["reconstruct_from"].as_array().unwrap().iter()
+            .map(|x| x.as_u64().unwrap() as usize).collect();
+        let mut sub = BTreeMap::new();
+        for i in keep { sub.insert(i, blob.shards[i].clone()); }
+        let recon = da::reconstruct(&sub, k, blob.orig_len).unwrap();
+        assert_eq!(recon, body, "reconstruct from k shards must equal the body");
+
+        // Merkle proof reproduces, verifies, and rejects a forged shard
+        let pi = case["proof_index"].as_u64().unwrap() as usize;
+        let proof = blob.proof(pi);
+        let want_proof = case["proof"].as_array().unwrap();
+        assert_eq!(proof.len(), want_proof.len(), "proof length");
+        for (got, wp) in proof.iter().zip(want_proof) {
+            let side = wp[0].as_str().unwrap().chars().next().unwrap();
+            assert_eq!(got.0, side, "proof side");
+            assert_eq!(hex::encode(got.1), wp[1].as_str().unwrap(), "proof sibling");
+        }
+        assert!(da::merkle_verify(&blob.shards[pi], &proof, &blob.root()));
+        let forged = vec![0u8; blob.shards[pi].len()];
+        assert!(!da::merkle_verify(&forged, &proof, &blob.root()),
+                "a forged shard must fail its Merkle proof");
+    }
+}
