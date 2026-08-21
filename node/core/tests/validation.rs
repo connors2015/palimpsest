@@ -211,6 +211,86 @@ fn challenge_below_quorum_is_rejected_and_refunds_owner() {
                "rejected challenger recovers nothing");
 }
 
+// --- adversarial ledger cases (task 126) ------------------------------------
+
+use palimpsest_core::token::TransferTx;
+
+fn signed_transfer(from: &core::Key, to: &str, amount: u64, nonce: u64) -> TransferTx {
+    let mut t = TransferTx {
+        from_pub: from.pub_hex(), to_addr: to.into(), amount, nonce, sig: vec![],
+    };
+    t.sig = from.sign(&AccountTx::Transfer(t.clone()).signing_bytes());
+    t
+}
+
+#[test]
+fn rejects_replayed_and_overspending_transfers() {
+    let sender = core::Key::from_seed([3u8; 32]);
+    let recipient = address(&core::Key::from_seed([4u8; 32]).pub_hex());
+    let mut led = TokenLedger::new();
+    led.apply_reward(1, &[sender.pub_hex()], &sender.pub_hex(), &[]);
+    let bal = led.balance(&address(&sender.pub_hex()));
+    assert!(bal > 0);
+
+    // a valid transfer applies once
+    let t0 = signed_transfer(&sender, &recipient, bal / 4, 0);
+    assert!(led.apply_transfer(&t0));
+    // REPLAY: the same tx (nonce 0) can't apply again — nonce advanced
+    assert!(!led.apply_transfer(&t0), "replayed transfer must be rejected");
+    // OVERSPEND: amount beyond balance is rejected
+    let huge = signed_transfer(&sender, &recipient, bal * 10, 1);
+    assert!(!led.apply_transfer(&huge), "overspending transfer must be rejected");
+    // WRONG NONCE: a future nonce (gap) can't apply yet
+    let gap = signed_transfer(&sender, &recipient, 1, 5);
+    assert!(!led.apply_transfer(&gap), "nonce gap must be rejected");
+    // FORGED SIG: a tampered amount invalidates the signature
+    let mut forged = signed_transfer(&sender, &recipient, 1, 1);
+    forged.amount = 999_999;
+    assert!(!led.apply_transfer(&forged), "tampered (bad-sig) transfer must be rejected");
+}
+
+#[test]
+fn rejects_bad_data_lane_txs() {
+    let owner = core::Key::from_seed([1u8; 32]);
+    let mut led = TokenLedger::new();
+    led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[]);
+
+    // zero-stake submission is rejected
+    let zero = signed(AccountTx::DataSubmit(DataSubmitTx {
+        owner_pub: owner.pub_hex(), data_hash: "aa".repeat(32), size_bytes: 8,
+        media_type: "text".into(), stake: 0, nonce: 0, sig: vec![],
+    }), &owner);
+    assert!(!led.apply_data_tx(&zero, 1, &HashSet::new()), "zero-stake submit rejected");
+
+    // a valid submission, then a duplicate challenge on the same entry
+    let sub = signed(AccountTx::DataSubmit(DataSubmitTx {
+        owner_pub: owner.pub_hex(), data_hash: "bb".repeat(32), size_bytes: 8,
+        media_type: "text".into(), stake: 1_000_000, nonce: 0, sig: vec![],
+    }), &owner);
+    assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
+    let data_id = sub.txid();
+    let challenger = core::Key::from_seed([2u8; 32]);
+    led.apply_reward(2, &[challenger.pub_hex()], &challenger.pub_hex(), &[]);
+    let ch = signed(AccountTx::DataChallenge(DataChallengeTx {
+        challenger_pub: challenger.pub_hex(), data_id: data_id.clone(), stake: 100_000,
+        reason: "validity".into(), nonce: 0, sig: vec![],
+    }), &challenger);
+    assert!(led.apply_data_tx(&ch, 2, &HashSet::new()));
+    // a SECOND challenge against the same data_id (already open) is rejected
+    let ch2 = signed(AccountTx::DataChallenge(DataChallengeTx {
+        challenger_pub: challenger.pub_hex(), data_id, stake: 100_000,
+        reason: "validity".into(), nonce: 1, sig: vec![],
+    }), &challenger);
+    assert!(!led.apply_data_tx(&ch2, 2, &HashSet::new()), "duplicate open challenge rejected");
+
+    // a challenge against a non-existent entry is rejected
+    let ghost = signed(AccountTx::DataChallenge(DataChallengeTx {
+        challenger_pub: challenger.pub_hex(), data_id: "cc".repeat(32), stake: 100_000,
+        reason: "validity".into(), nonce: 1, sig: vec![],
+    }), &challenger);
+    assert!(!led.apply_data_tx(&ghost, 2, &HashSet::new()), "challenge on missing entry rejected");
+}
+
 // --- snapshot (de)serialization hardening (task 94) -------------------------
 
 #[test]
