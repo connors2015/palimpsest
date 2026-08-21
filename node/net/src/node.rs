@@ -38,6 +38,16 @@ const MAX_ACCOUNT_POOL: usize = 4096;
 const MAX_PENDING: usize = 256;
 const MAX_SEEN: usize = 100_000;
 
+// --- sync catch-up ----------------------------------------------------------
+// A response is bounded by BYTES, not a fixed block count: a small-model chain
+// packs many tiny blocks per response (fast catch-up) while a big-model chain
+// (~18MB/block) sends only a few (protects small peers / slow uplinks). We keep
+// at most one request in flight per peer, but re-request as soon as the previous
+// response lands — so a node that fell behind actually recovers.
+const SYNC_MAX_BLOCKS: usize = 64;
+const SYNC_BYTE_BUDGET: usize = 48 * 1024 * 1024;
+const SYNC_INFLIGHT_TIMEOUT: f64 = 30.0;
+
 /// A delta is worth holding only if its base_height sits in the includable
 /// window around the current head. Pure + total so it can be unit-tested.
 pub fn delta_in_window(base_height: u64, head_height: u64) -> bool {
@@ -916,18 +926,23 @@ pub async fn run(
                                 // BUT at most one in-flight catch-up per peer per
                                 // 90s — payload batches are tens of MB and stacked
                                 // transfers saturate home uplinks without landing
-                                let recent = node.last_sync_req
+                                // one request in flight per peer; re-request as
+                                // soon as the last response landed (last_sync_req
+                                // is cleared on receipt) or after a lost-response
+                                // timeout — so a lagging node keeps catching up.
+                                let inflight = node.last_sync_req
                                     .get(&propagation_source)
-                                    .map(|t| now() - t < 90.0)
+                                    .map(|t| now() - t < SYNC_INFLIGHT_TIMEOUT)
                                     .unwrap_or(false);
-                                if !node.tree.blocks.contains_key(&hash) && !recent {
+                                if !node.tree.blocks.contains_key(&hash) && !inflight {
                                     node.last_sync_req
                                         .insert(propagation_source, now());
                                     let from = node.head_height()
                                         .min(height).saturating_sub(2);
                                     info!(peer = %propagation_source, their_h = height,
                                           from, "unknown head — requesting sync");
-                                    let req = SyncRequest { from_height: from, count: 8 };
+                                    let req = SyncRequest {
+                                        from_height: from, count: SYNC_MAX_BLOCKS as u64 };
                                     swarm.behaviour_mut().sync
                                         .send_request(&propagation_source, req);
                                 }
@@ -936,44 +951,49 @@ pub async fn run(
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(
-                        request_response::Event::Message { message, .. })) => {
+                        request_response::Event::Message { peer, message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            // serve blocks along OUR head chain in the range;
-                            // cap the batch — payload-heavy responses at real
-                            // model scale (~18MB/block) OOM small peers and
-                            // drown slow uplinks
-                            let count = request.count.min(2);
-                            let mut chain = Vec::new();
+                            // serve OUR head chain from `from_height` upward,
+                            // oldest-first, bounded by SYNC_BYTE_BUDGET (always at
+                            // least one block, so progress is guaranteed).
+                            let mut ascending: Vec<String> = Vec::new();
                             let mut cur = node.tree.head.clone();
                             while cur != node.tree.genesis_hash {
                                 let hdr = &node.tree.blocks[&cur];
                                 if hdr.height < request.from_height {
                                     break;
                                 }
-                                if hdr.height < request.from_height + count {
-                                    if let Some(sb) = node.blocks_full.get(&cur) {
-                                        chain.push(sb.clone());
-                                    }
-                                }
+                                ascending.push(cur.clone());
                                 cur = hdr.prev_hash.clone();
                             }
-                            chain.reverse();
+                            ascending.reverse();
+                            let want = (request.count as usize).min(SYNC_MAX_BLOCKS);
+                            let mut chain = Vec::new();
                             let mut payloads = HashMap::new();
-                            for sb in &chain {
+                            let mut bytes = 0usize;
+                            for h in ascending {
+                                if chain.len() >= want {
+                                    break;
+                                }
+                                let Some(sb) = node.blocks_full.get(&h).cloned() else { continue };
                                 for t in &sb.txs {
                                     if let Some(tc) = t.to_core() {
                                         let txid = tc.txid();
-                                        if let Some(p) = node.payloads.get(&txid)
-                                            .cloned()
+                                        if let Some(p) = node.payloads.get(&txid).cloned()
                                             .or_else(|| node.store.get_payload(&txid)) {
+                                            bytes += p.wire_bytes();
                                             payloads.insert(txid, p);
                                         }
                                     }
                                 }
+                                chain.push(sb);
+                                if bytes >= SYNC_BYTE_BUDGET {
+                                    break; // packed a budget's worth (>=1 block sent)
+                                }
                             }
                             info!(from = request.from_height, served = chain.len(),
-                                  "serving sync request");
+                                  kb = bytes / 1024, "serving sync request");
                             let resp = SyncResponse {
                                 blocks: chain, payloads,
                                 head_height: node.head_height(),
@@ -995,6 +1015,10 @@ pub async fn run(
                                 node.install(sb, None, &mut swarm);
                             }
                             node.retry_pending(&mut swarm);
+                            // clear the in-flight marker so the next Head from this
+                            // peer immediately pulls the next batch (continuous
+                            // catch-up instead of one batch per throttle window)
+                            node.last_sync_req.remove(&peer);
                         }
                     }
                 }
