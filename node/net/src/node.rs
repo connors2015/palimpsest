@@ -642,9 +642,8 @@ impl Node {
             return (json!({"ok": false, "error": "empty file"}), None);
         }
         let hash = core::delta_hash(&bytes);
-        if let Err(e) = self.store.save_upload(&hash, &bytes) {
-            return (json!({"ok": false, "error": format!("store: {e}")}), None);
-        }
+        // check the balance BEFORE writing attacker-supplied bytes to disk, so a
+        // caller can't fill the disk with unfunded uploads.
         let led = self.tree.head_ledger();
         let my_addr = address(&self.key.pub_hex());
         if led.balance(&my_addr) < stake {
@@ -652,8 +651,11 @@ impl Node {
                 "error": format!("node wallet balance {} < stake {}",
                                  led.balance(&my_addr), stake),
                 "data_hash": hash,
-                "hint": "file is custodied; submit on-chain from a funded wallet \
-                         with: wallet submit-data"}), None);
+                "hint": "fund the node wallet, or submit on-chain from a funded \
+                         wallet with: wallet submit-data"}), None);
+        }
+        if let Err(e) = self.store.save_upload(&hash, &bytes) {
+            return (json!({"ok": false, "error": format!("store: {e}")}), None);
         }
         let mut tx = DataSubmitTx {
             owner_pub: self.key.pub_hex(),

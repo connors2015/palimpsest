@@ -12,6 +12,7 @@
 
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     routing::{get, post},
     Json, Router,
 };
@@ -35,6 +36,27 @@ pub enum ApiCmd {
 #[derive(Clone)]
 struct Api {
     tx: mpsc::Sender<ApiCmd>,
+    /// Bearer token gating operator-only endpoints (/upload spends the node's
+    /// wallet; /chat monopolizes the trainer). None => those endpoints are
+    /// disabled entirely (safe default). Read + signature-authenticated tx
+    /// endpoints are always open — that's how a decentralized mempool works.
+    admin_token: Option<String>,
+}
+
+/// True iff the request carries `Authorization: Bearer <admin_token>`. An
+/// unset admin token disables the guarded endpoints rather than opening them.
+fn authorized(api: &Api, headers: &HeaderMap) -> bool {
+    let Some(tok) = &api.admin_token else { return false };
+    headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.strip_prefix("Bearer ").unwrap_or(h) == tok)
+        .unwrap_or(false)
+}
+
+fn forbidden() -> Json<Value> {
+    Json(json!({"ok": false,
+        "error": "unauthorized: this endpoint requires the operator's \
+                  Authorization: Bearer token (set PALIMPSEST_API_TOKEN)"}))
 }
 
 async fn ask(tx: &mpsc::Sender<ApiCmd>, make: impl FnOnce(oneshot::Sender<Value>) -> ApiCmd)
@@ -70,16 +92,23 @@ async fn miners(State(api): State<Api>) -> Json<Value> {
     ask(&api.tx, ApiCmd::Miners).await
 }
 
-async fn chat(State(api): State<Api>, Json(b): Json<Value>) -> Json<Value> {
+async fn chat(State(api): State<Api>, headers: HeaderMap, Json(b): Json<Value>) -> Json<Value> {
+    if !authorized(&api, &headers) {
+        return forbidden();
+    }
     let prompt = b["prompt"].as_str().unwrap_or("").chars().take(1000).collect();
     ask(&api.tx, |o| ApiCmd::Chat(prompt, o)).await
 }
 
 async fn upload(
     State(api): State<Api>,
+    headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
     body: axum::body::Bytes,
 ) -> Json<Value> {
+    if !authorized(&api, &headers) {
+        return forbidden();
+    }
     let stake = q.get("stake").and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
     let grains = (stake * 1e9) as u64;
     let media = q.get("media").cloned().unwrap_or_else(|| "text".into());
@@ -111,7 +140,9 @@ async fn data_vote(State(api): State<Api>, Json(b): Json<Value>) -> Json<Value> 
     ask(&api.tx, |o| ApiCmd::SubmitAccountTx(tag("data_vote", b), o)).await
 }
 
-pub async fn run(port: u16, tx: mpsc::Sender<ApiCmd>) {
+pub async fn run(bind: String, port: u16, admin_token: Option<String>,
+                 tx: mpsc::Sender<ApiCmd>) {
+    let guarded = admin_token.is_some();
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/status", get(status))
@@ -126,19 +157,20 @@ pub async fn run(port: u16, tx: mpsc::Sender<ApiCmd>) {
         .route("/data/challenge", post(data_challenge))
         .route("/data/vote", post(data_vote))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(Api { tx });
+        .with_state(Api { tx, admin_token });
     // retry the bind: fast restarts leave the old socket lingering briefly, and
     // a silently-dead API made live nodes look wedged during the rehearsal
     let listener = loop {
-        match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+        match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
             Ok(l) => break l,
             Err(e) => {
-                tracing::warn!("api port {port} busy ({e}); retrying in 3s");
+                tracing::warn!("api {bind}:{port} busy ({e}); retrying in 3s");
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         }
     };
-    info!("http api on 0.0.0.0:{port}");
+    info!("http api on {bind}:{port} (admin endpoints {})",
+          if guarded { "token-gated" } else { "DISABLED — set PALIMPSEST_API_TOKEN" });
     let _ = axum::serve(listener, app).await;
 }
 
@@ -306,3 +338,31 @@ document.getElementById('up').onclick=function(){
  }).catch(function(e){note.textContent='upload failed: '+e})};
 poll();setInterval(poll,5000);
 </script></body></html>"#;
+
+#[cfg(test)]
+mod api_auth_tests {
+    use super::*;
+
+    fn api(token: Option<&str>) -> Api {
+        let (tx, _rx) = mpsc::channel(1);
+        Api { tx, admin_token: token.map(|s| s.to_string()) }
+    }
+    fn hdr(v: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(v) = v {
+            h.insert("authorization", v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn admin_endpoints_require_matching_token() {
+        // no token configured => guarded endpoints are closed, even with a header
+        assert!(!authorized(&api(None), &hdr(Some("Bearer anything"))));
+        let a = api(Some("s3cret"));
+        assert!(authorized(&a, &hdr(Some("Bearer s3cret"))), "Bearer form accepted");
+        assert!(authorized(&a, &hdr(Some("s3cret"))), "bare token accepted");
+        assert!(!authorized(&a, &hdr(Some("Bearer wrong"))), "wrong token denied");
+        assert!(!authorized(&a, &hdr(None)), "missing header denied");
+    }
+}

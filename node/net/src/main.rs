@@ -48,6 +48,8 @@ struct Args {
     port: u16,
     #[arg(long, default_value_t = 8090)]
     api_port: u16,
+    #[arg(long, default_value = "0.0.0.0")]
+    api_bind: String,        // interface for the HTTP API/dashboard
     #[arg(long, default_value_t = 7999)]
     bridge_port: u16,
     #[arg(long, default_value = "")]
@@ -222,7 +224,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (api_tx, api_rx) = mpsc::channel(64);
     let (bridge_cmd_tx, bridge_cmd_rx) = mpsc::channel::<bridge::ToBridge>(16);
     let (bridge_ev_tx, bridge_ev_rx) = mpsc::channel::<bridge::FromBridge>(16);
-    tokio::spawn(api::run(args.api_port, api_tx));
+    let api_token = std::env::var("PALIMPSEST_API_TOKEN").ok().filter(|t| !t.is_empty());
+    tokio::spawn(api::run(args.api_bind.clone(), args.api_port, api_token, api_tx));
     tokio::spawn(bridge::run(args.bridge_port, bridge_cmd_rx, bridge_ev_tx));
 
     let rotate = (!args.rotate.is_empty()).then(|| {
