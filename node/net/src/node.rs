@@ -148,6 +148,9 @@ pub struct Node {
     pub t0: f64,
     pub last_proposed_round: i64,
     pub last_announced_round: i64,
+    /// per-peer timestamp of the last sync we requested — heartbeat-triggered
+    /// catch-up must not stack concurrent multi-hundred-MB transfers
+    pub last_sync_req: HashMap<PeerId, f64>,
 }
 
 impl Node {
@@ -580,12 +583,20 @@ pub async fn run(
                                 node.retry_pending(&mut swarm);
                             }
                             Gossip::Head { hash, height } => {
-                                // unknown head (or a heavier-looking chain we
-                                // don't hold) -> pull the sender's recent chain
-                                if !node.tree.blocks.contains_key(&hash) {
+                                // unknown head -> pull the sender's recent chain,
+                                // BUT at most one in-flight catch-up per peer per
+                                // 90s — payload batches are tens of MB and stacked
+                                // transfers saturate home uplinks without landing
+                                let recent = node.last_sync_req
+                                    .get(&propagation_source)
+                                    .map(|t| now() - t < 90.0)
+                                    .unwrap_or(false);
+                                if !node.tree.blocks.contains_key(&hash) && !recent {
+                                    node.last_sync_req
+                                        .insert(propagation_source, now());
                                     let from = node.head_height()
-                                        .min(height).saturating_sub(8);
-                                    let req = SyncRequest { from_height: from, count: 64 };
+                                        .min(height).saturating_sub(2);
+                                    let req = SyncRequest { from_height: from, count: 8 };
                                     swarm.behaviour_mut().sync
                                         .send_request(&propagation_source, req);
                                 }
@@ -599,8 +610,9 @@ pub async fn run(
                         request_response::Message::Request { request, channel, .. } => {
                             // serve blocks along OUR head chain in the range;
                             // cap the batch — payload-heavy responses at real
-                            // model scale (~18MB/block) OOM small peers
-                            let count = request.count.min(8);
+                            // model scale (~18MB/block) OOM small peers and
+                            // drown slow uplinks
+                            let count = request.count.min(2);
                             let mut chain = Vec::new();
                             let mut cur = node.tree.head.clone();
                             while cur != node.tree.genesis_hash {
