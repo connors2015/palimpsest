@@ -130,13 +130,13 @@ def main():
     h = Header(height=5, prev_hash="ab" * 32, state_root="cd" * 32,
                txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub,
                transfer_root="12" * 32, ledger_root="34" * 32,
-               data_root="56" * 32, vrf_proof="ab" * 32)
+               data_root="56" * 32, vrf_proof="ab" * 32, score_root="77" * 32)
     v["header"] = [{
         "height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
         "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
         "proposer": h.proposer, "transfer_root": h.transfer_root,
         "ledger_root": h.ledger_root, "data_root": h.data_root,
-        "vrf_proof": h.vrf_proof,
+        "vrf_proof": h.vrf_proof, "score_root": h.score_root,
         "canonical_json": json.dumps(h.__dict__, sort_keys=True),
         "hash": h.block_hash(),
     }]
@@ -322,6 +322,26 @@ def main():
         },
     }]
 
+    # --- rev 7 delta scoring: score-weighted miner split -----------------------
+    sc_a = Key.generate(b"scoring-miner-a-0000000000000000")
+    sc_b = Key.generate(b"scoring-miner-b-0000000000000000")
+    led_s = TokenLedger()
+    led_s.apply_reward(3, [sc_a.pub, sc_b.pub], "genesis",
+                       miner_weights={sc_a.pub: 300_000, sc_b.pub: 100_000})
+    led_z = TokenLedger()
+    led_z.apply_reward(3, [sc_a.pub, sc_b.pub], "genesis",
+                       miner_weights={})                 # all-zero -> equal split
+    v["scoring"] = [{
+        "miner_a": sc_a.pub, "miner_b": sc_b.pub, "height": 3,
+        "weights": {sc_a.pub: 300_000, sc_b.pub: 100_000},
+        "balance_a": led_s.balance(address(sc_a.pub)),
+        "balance_b": led_s.balance(address(sc_b.pub)),
+        "root": led_s.root(),
+        "equal_balance_a": led_z.balance(address(sc_a.pub)),
+        "equal_balance_b": led_z.balance(address(sc_b.pub)),
+        "equal_root": led_z.root(),
+    }]
+
     # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----
     from rig import da as _da
     da_body = bytes((i * 7 + 3) % 256 for i in range(100))
@@ -398,9 +418,13 @@ def main():
             d = quantize(rng.standard_normal(dim) * 0.1)
             tx = mk_tx(mk, hh, s, d)
             txs.append(tx); bodies[tx.da_pointer] = d
+        # rev 7: distinct nonzero committed scores lock score_root + the
+        # score-weighted miner split + score-weighted data credits
+        scr = {t.txid(): 100_000 * (i + 1) for i, t in enumerate(txs)}
         blk = build_block(tree, parent, txs, bodies,
                           {t.txid(): 1.0 for t in txs}, proposer_key,
-                          transfers=list(transfers), data_txs=list(data_txs))
+                          transfers=list(transfers), data_txs=list(data_txs),
+                          scores=scr)
         tree.add_block(blk)
         blocks_out.append({
             "parent": parent, "hash": blk.hash,
@@ -410,6 +434,7 @@ def main():
                      "da_pointer": t.da_pointer, "bond": t.bond,
                      "data_refs": t.canonical_refs(), "sig_hex": t.sig.hex()}
                     for t in txs],
+            "scores": blk.scores,
             "bodies": {p: b.tolist() for p, b in blk.bodies.items()},
             "transfers": [{"from_pub": t.from_pub, "to_addr": t.to_addr,
                            "amount": t.amount, "nonce": t.nonce,

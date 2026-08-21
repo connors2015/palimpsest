@@ -286,7 +286,8 @@ impl TokenLedger {
     /// hair under the nominal curve — a known, documented property, not a leak.
     pub fn apply_reward(&mut self, height: u64, miner_pubs: &[String],
                         proposer_pub: &str, legacy_data_addrs: &[String],
-                        data_credits: &BTreeMap<String, u64>) {
+                        data_credits: &BTreeMap<String, u64>,
+                        miner_weights: &BTreeMap<String, u64>) {
         let total = emission(height);
         if total == 0 && self.fee_train_pool == 0 && self.fee_data_pool == 0 {
             return;
@@ -302,12 +303,28 @@ impl TokenLedger {
             self.fee_train_pool = 0;
         }
         if !miner_pubs.is_empty() {
-            let each = miners_pool / miner_pubs.len() as u64;
-            let mut sorted: Vec<&String> = miner_pubs.iter().collect();
-            sorted.sort();
-            for p in sorted {
-                let a = address(p);
-                self.credit(&a, each);
+            // rev 7: split ∝ committed delta score when weights are given (and
+            // nonzero); equal split otherwise. BTreeMap over the block's miner
+            // pubs dedups + iterates sorted — identical to the rig's
+            // `sorted(set(miner_pubs))`. Dust burned either way.
+            let weights: BTreeMap<&String, u64> = miner_pubs.iter()
+                .map(|p| (p, *miner_weights.get(p).unwrap_or(&0)))
+                .collect();
+            let wsum: u128 = weights.values().map(|w| *w as u128).sum();
+            if wsum > 0 {
+                for (p, w) in weights {
+                    let share = (miners_pool as u128 * w as u128 / wsum) as u64;
+                    let a = address(p);
+                    self.credit(&a, share);
+                }
+            } else {
+                let each = miners_pool / miner_pubs.len() as u64;
+                let mut sorted: Vec<&String> = miner_pubs.iter().collect();
+                sorted.sort();
+                for p in sorted {
+                    let a = address(p);
+                    self.credit(&a, each);
+                }
             }
         }
         if !proposer_pub.is_empty() && proposer_pub != "genesis" {

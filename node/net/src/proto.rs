@@ -100,6 +100,8 @@ pub struct WireHeader {
     pub data_root: String,
     #[serde(default)]
     pub vrf_proof: String,
+    #[serde(default)]
+    pub score_root: String,    // rev 7: commitment to the proposer's delta scores
 }
 
 impl WireHeader {
@@ -116,6 +118,7 @@ impl WireHeader {
             ledger_root: self.ledger_root.clone(),
             data_root: self.data_root.clone(),
             vrf_proof: self.vrf_proof.clone(),
+            score_root: self.score_root.clone(),
         }
     }
 
@@ -132,6 +135,7 @@ impl WireHeader {
             ledger_root: h.ledger_root.clone(),
             data_root: h.data_root.clone(),
             vrf_proof: h.vrf_proof.clone(),
+            score_root: h.score_root.clone(),
         }
     }
 }
@@ -251,6 +255,8 @@ pub struct StoredBlock {
     pub txs: Vec<WireDeltaTx>,
     pub transfers: Vec<Value>, // account-tx JSON (kind=transfer)
     pub data_txs: Vec<Value>,  // account-tx JSON (data lane)
+    #[serde(default)]
+    pub scores: std::collections::BTreeMap<String, u64>, // rev 7: txid -> score
 }
 
 impl StoredBlock {
@@ -280,7 +286,8 @@ impl StoredBlock {
         for v in &self.data_txs {
             data_txs.push(account_tx_from_json(v)?);
         }
-        Some(Block { header: self.header.to_core(), txs, bodies, transfers, data_txs })
+        Some(Block { header: self.header.to_core(), txs, bodies, transfers, data_txs,
+                     scores: self.scores.clone() })
     }
 }
 

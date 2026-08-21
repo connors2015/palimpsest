@@ -57,13 +57,15 @@ def test_staked_submission_earns_weighted_share(core):
     assert entry["media_type"] == "csv"                 # bytes are bytes — any modality
     founder_before = led.balance(g.DATA_CONTRIBUTOR)
     miner_before = led.balance(address(miner.pub))
-    _mine(core)                                         # block 3: split by weight
+    _mine(core)                                         # block 3: split across named
     led = core.head_ledger()
     d_founder = led.balance(g.DATA_CONTRIBUTOR) - founder_before
     d_pool = emission(3) * 2_000 // 10_000
-    # founder gets weight-proportional share, not all of it any more
-    from rig.token import GENESIS_DATA_WEIGHT
-    assert d_founder == d_pool * GENESIS_DATA_WEIGHT // (GENESIS_DATA_WEIGHT + stake)
+    # rev 7: the data share splits by DELTA SCORE, not registry weight — the
+    # round's single delta names both active corpora, so each takes an equal
+    # slice of its score and the pool splits 50/50 (registry weight now only
+    # gates active-set membership; loss scores carry the economic weighting).
+    assert d_founder == d_pool // 2
     assert led.balance(address(miner.pub)) > miner_before   # miner earns data share too
 
 

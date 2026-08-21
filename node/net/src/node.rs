@@ -291,6 +291,15 @@ pub struct Node {
     pub blocks_full: HashMap<String, StoredBlock>,
     pub payloads: HashMap<String, Payload>,       // txid -> compressed payload
     pub delta_pool: HashMap<String, core::BackpropTx>,
+    /// rev 7: held-out-loss scores from OUR trainer for pool deltas (txid ->
+    /// micro-nats). Filled asynchronously via the bridge Eval verb; a missing
+    /// score is 0 and the uniform fallback covers an entirely unscored block.
+    /// Evicted in lockstep with delta_pool.
+    pub delta_scores: HashMap<String, u64>,
+    /// #114 (observable half): per-proposer count of pool deltas we had
+    /// gossiped BEFORE a proposer's block arrived that the block then omitted.
+    /// Censorship-suspicion observability, NOT a consensus rule.
+    pub omitted_deltas: std::collections::BTreeMap<String, u64>,
     pub account_pool: HashMap<String, AccountTx>,
     pub pending: HashMap<String, (StoredBlock, PeerId)>, // blocks awaiting payloads
     pub seen: HashSet<String>,
@@ -343,8 +352,41 @@ impl Node {
     /// (it was written on accept; if it's never mined it is pure garbage).
     fn drop_pool_delta(&mut self, txid: &str) {
         self.delta_pool.remove(txid);
+        self.delta_scores.remove(txid);
         self.payloads.remove(txid);
         self.store.remove_payload(txid);
+    }
+
+    /// rev 7: the eval seed for the current proposal round — deterministic from
+    /// (head hash, next height) so one round scores against one held-out batch.
+    /// NOT consensus (scores are committed claims); it only needs to be stable
+    /// within a round and not miner-chosen.
+    fn eval_seed(&self) -> u64 {
+        let hh = core::delta_hash(
+            format!("{}|{}", self.tree.head, self.head_height() + 1).as_bytes());
+        u64::from_str_radix(&hh[..16], 16).unwrap_or(0)
+    }
+
+    /// Ask our trainer to score every still-unscored pool delta at the head
+    /// height. Fire-and-forget: production NEVER blocks on eval — deltas
+    /// without a score in time weigh 0 (uniform fallback if all are unscored).
+    fn request_evals(&mut self) {
+        if !self.bridge_synced {
+            return;
+        }
+        let hh = self.head_height();
+        let want: Vec<(String, SparseI64)> = self.delta_pool.iter()
+            .filter(|(id, t)| t.base_height == hh && !self.delta_scores.contains_key(*id))
+            .filter_map(|(id, _)| {
+                let dense = self.payloads.get(id)?.dense()?;
+                Some((id.clone(), Payload::from_dense_i64(&dense)))
+            })
+            .collect();
+        if !want.is_empty() {
+            let _ = self.bridge_tx.try_send(ToBridge::Eval {
+                height: hh, seed: self.eval_seed(), deltas: want,
+            });
+        }
     }
 
     /// Evict stale/over-cap deltas. Stale = outside the includable window (can
@@ -426,6 +468,9 @@ impl Node {
         self.payloads.insert(txid.clone(), payload);
         self.delta_pool.insert(txid, tx);
         self.evict_delta_pool();
+        // rev 7: score the newcomer (and any other unscored delta) so its
+        // committed score is ready by propose time. Async; never blocks.
+        self.request_evals();
         true
     }
 
@@ -497,19 +542,35 @@ impl Node {
         // rejected (including by itself).
         let data_addrs: Vec<String> = self.tree.data_contributor.clone()
             .map(|d| vec![d]).unwrap_or_default();
-        let hash_weight: std::collections::BTreeMap<String, u64> = scratch.registry.values()
-            .filter(|e| e["status"] == "active" && e["weight"].as_u64().unwrap_or(0) > 0)
-            .filter_map(|e| Some((e["data_hash"].as_str()?.to_string(), e["weight"].as_u64()?)))
+        // rev 7: commit our trainer's held-out scores for the chosen deltas
+        // (missing -> 0; the uniform fallback covers an all-unscored block),
+        // then weight the dry-run rewards EXACTLY as the validator will.
+        let blk_scores: std::collections::BTreeMap<String, u64> = chosen.iter()
+            .map(|t| {
+                let id = t.txid();
+                let s = self.delta_scores.get(&id).copied().unwrap_or(0)
+                    .min(core::blocktree::SCORE_CAP);
+                (id, s)
+            })
             .collect();
+        let eff = core::blocktree::effective_scores(&chosen, &blk_scores);
+        let active_set: std::collections::BTreeSet<String> = scratch.registry.values()
+            .filter(|e| e["status"] == "active" && e["weight"].as_u64().unwrap_or(0) > 0)
+            .filter_map(|e| e["data_hash"].as_str().map(String::from))
+            .collect();
+        let mut miner_weights: std::collections::BTreeMap<String, u64> = Default::default();
         let mut data_credits: std::collections::BTreeMap<String, u64> = Default::default();
         for t in &chosen {
-            for r in t.canonical_refs() {
-                if let Some(w) = hash_weight.get(&r) {
-                    *data_credits.entry(r).or_insert(0) += *w;
-                }
+            let s = eff[&t.txid()];
+            *miner_weights.entry(t.miner.clone()).or_insert(0) += s;
+            let named: Vec<String> = t.canonical_refs().into_iter()
+                .filter(|r| active_set.contains(r)).collect();
+            for r in &named {
+                *data_credits.entry(r.clone()).or_insert(0) += s * 10_000 / named.len() as u64;
             }
         }
-        scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &data_addrs, &data_credits);
+        scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &data_addrs,
+                             &data_credits, &miner_weights);
         for t in &chosen {
             // bonds are 0 during bootstrap; a delta whose miner cannot afford its
             // bond would make the block invalid, so it must not be built on.
@@ -559,12 +620,14 @@ impl Node {
             ledger_root: scratch.root(),
             data_root: palimpsest_core::token::data_root(&core_data),
             vrf_proof: hex::encode(&vrf_proof),
+            score_root: core::blocktree::scores_root(&blk_scores),
         };
         let stored = StoredBlock {
             header: WireHeader::from_core(&header),
             txs: chosen.iter().map(WireDeltaTx::from_core).collect(),
             transfers,
             data_txs,
+            scores: blk_scores.clone(),
         };
         let mut bodies = HashMap::new();
         for t in chosen.iter() {
@@ -573,6 +636,7 @@ impl Node {
         let block = palimpsest_core::blocktree::Block {
             header, txs: chosen, bodies,
             transfers: core_transfers, data_txs: core_data,
+            scores: blk_scores,
         };
         Some((stored, block))
     }
@@ -633,10 +697,26 @@ impl Node {
                             silent chain truncation", sb.header.height);
                     std::process::exit(1);
                 }
+                // #114 (observable half): a VALIDATED foreign block that omits
+                // deltas we had already gossiped for its height is censorship-
+                // suspicious. Count per proposer — observability, NOT consensus.
+                if from.is_some() && sb.header.proposer != self.key.pub_hex() {
+                    let included: HashSet<String> = sb.txs.iter()
+                        .filter_map(|t| t.to_core().map(|tc| tc.txid())).collect();
+                    let omitted = self.delta_pool.iter()
+                        .filter(|(id, t)| t.base_height + 1 == sb.header.height
+                                && !included.contains(*id))
+                        .count() as u64;
+                    if omitted > 0 {
+                        *self.omitted_deltas
+                            .entry(sb.header.proposer.clone()).or_insert(0) += omitted;
+                    }
+                }
                 for t in &sb.txs {
                     if let Some(tc) = t.to_core() {
                         let id = tc.txid();
                         self.delta_pool.remove(&id);
+                        self.delta_scores.remove(&id);
                         // drop the in-memory payload only once it is confirmed on
                         // disk (the block references it; sync/replay read it back).
                         if let Some(p) = self.payloads.get(&id) {
@@ -719,6 +799,8 @@ impl Node {
         // the head moved: prune mempools + pending against it
         self.evict_delta_pool();
         self.evict_account_pool();
+        // rev 7: (re)score surviving pool deltas against the new head's round
+        self.request_evals();
         let drop_pending: Vec<String> = self.pending.iter()
             .filter(|(_, (s, _))| s.header.height + DELTA_STALE_SLACK < h)
             .map(|(k, _)| k.clone()).collect();
@@ -813,6 +895,11 @@ impl Node {
               self.bridge_synced as u64),
             g("1 if a training round is in flight", "train_inflight",
               self.train_inflight as u64),
+            g("pool deltas scored by our trainer", "scored_deltas",
+              self.delta_scores.len() as u64),
+            g("gossiped deltas omitted from foreign blocks (censorship \
+               suspicion; #114 observable half)", "omitted_deltas_total",
+              self.omitted_deltas.values().sum::<u64>()),
         ].concat()
     }
 
@@ -858,7 +945,11 @@ impl Node {
         }).collect();
         miners.sort_by_key(|m| std::cmp::Reverse(m["blocks_proposed"].as_u64().unwrap_or(0)));
         json!({"miners": miners, "peers_connected": self.peers_connected,
-               "head_height": self.head_height()})
+               "head_height": self.head_height(),
+               // #114 observable half: per-proposer omission counts (deltas we
+               // gossiped that their blocks left out) — censorship suspicion,
+               // not consensus.
+               "omissions": self.omitted_deltas})
     }
 
     fn api_upload(&mut self, bytes: Vec<u8>, stake: u64, media: String) -> (Value, Option<Gossip>) {
@@ -1014,7 +1105,9 @@ pub async fn run(
                                     }
                                     for t in &stored.txs {
                                         if let Some(tc) = t.to_core() {
-                                            node.delta_pool.remove(&tc.txid());
+                                            let id = tc.txid();
+                                            node.delta_pool.remove(&id);
+                                            node.delta_scores.remove(&id);
                                         }
                                     }
                                     for v in stored.transfers.iter()
@@ -1055,6 +1148,19 @@ pub async fn run(
                     if let Some(tx) = node.chat_pending.pop() {
                         let _ = tx.send(json!({"ok": true, "reply": text,
                                                "height": height}));
+                    }
+                }
+                FromBridge::Scores { height, scores } => {
+                    // rev 7: cache our trainer's held-out scores for pool deltas;
+                    // build_candidate commits them. Clamped; only for deltas we
+                    // still hold (stale responses no-op harmlessly).
+                    if height == node.head_height() {
+                        for (txid, s) in scores {
+                            if node.delta_pool.contains_key(&txid) {
+                                node.delta_scores.insert(
+                                    txid, s.min(core::blocktree::SCORE_CAP));
+                            }
+                        }
                     }
                 }
                 FromBridge::Delta { height, loss, payload } => {

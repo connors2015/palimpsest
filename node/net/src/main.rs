@@ -209,7 +209,13 @@ async fn fetch_genesis(swarm: &mut libp2p::Swarm<node::Behaviour>,
                         message: request_response::Message::Response { response, .. }, .. })) = ev
                 {
                     if let Some(w) = response.genesis {
-                        if core::blocktree::genesis_block_hash(&w) == expected_hash {
+                        // Accept either published form of the genesis id: the
+                        // genesis block hash (header-format dependent) or the
+                        // genesis state_root (sha256 of the raw weight bytes —
+                        // what make_genesis prints and the docs publish, stable
+                        // across header revisions). Both pin the same weights.
+                        if core::blocktree::genesis_block_hash(&w) == expected_hash
+                            || core::state_root(&w) == expected_hash {
                             info!(dim = w.len(), "fetched + verified genesis from a peer");
                             return Some(w);
                         }
@@ -313,6 +319,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         blocks_full,
         payloads,
         delta_pool: Default::default(),
+        delta_scores: Default::default(),
+        omitted_deltas: Default::default(),
         account_pool: Default::default(),
         pending: Default::default(),
         seen: Default::default(),

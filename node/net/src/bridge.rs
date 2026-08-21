@@ -25,6 +25,10 @@ pub enum ToBridge {
     Train { height: u64, seed: u64 },
     Advance { height: u64, sparse: SparseI64 },
     Generate { prompt: String, n: u64 },
+    /// rev 7: score candidate deltas on a held-out batch (seeded from block
+    /// context). Each delta rides as a full-i64 sparse vector the trainer adds
+    /// to its synced state, evaluates, and reverts.
+    Eval { height: u64, seed: u64, deltas: Vec<(String, SparseI64)> },
 }
 
 #[derive(Debug)]
@@ -33,6 +37,8 @@ pub enum FromBridge {
     Delta { height: u64, loss: f64, payload: Payload },
     NeedState,
     Generated { text: String, height: u64 },
+    /// rev 7: micro-nat held-out-loss improvements per txid.
+    Scores { height: u64, scores: Vec<(String, u64)> },
 }
 
 async fn write_frame<W: AsyncWriteExt + Unpin>(s: &mut W, bytes: &[u8]) -> std::io::Result<()> {
@@ -92,6 +98,17 @@ async fn serve_one(
                         height: v["height"].as_u64().unwrap_or(0),
                     }).await;
                 }
+                Some("scores") => {
+                    let scores = v["scores"].as_object()
+                        .map(|m| m.iter()
+                            .filter_map(|(k, x)| x.as_u64().map(|s| (k.clone(), s)))
+                            .collect())
+                        .unwrap_or_default();
+                    let _ = ev.send(FromBridge::Scores {
+                        height: v["height"].as_u64().unwrap_or(0),
+                        scores,
+                    }).await;
+                }
                 _ => {}
             }
         }
@@ -123,6 +140,14 @@ async fn serve_one(
                     }
                     ToBridge::Generate { prompt, n } => {
                         let m = json!({"t": "generate", "prompt": prompt, "n": n});
+                        write_frame(&mut wr, m.to_string().as_bytes()).await
+                    }
+                    ToBridge::Eval { height, seed, deltas } => {
+                        let ds: Vec<Value> = deltas.iter()
+                            .map(|(txid, sp)| json!({"txid": txid, "sparse": sp}))
+                            .collect();
+                        let m = json!({"t": "eval", "height": height,
+                                       "seed": seed, "deltas": ds});
                         write_frame(&mut wr, m.to_string().as_bytes()).await
                     }
                 };

@@ -9,7 +9,7 @@ use crate::token::{
     TransferTx, PROPOSER_LOOKBACK,
 };
 use crate::{delta_hash, int64_bytes, state_root, trimmed_mean, txset_root, BackpropTx, Header};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub struct Block {
     pub header: Header,
@@ -17,6 +17,34 @@ pub struct Block {
     pub bodies: HashMap<String, Vec<i64>>, // da_pointer -> dense delta
     pub transfers: Vec<TransferTx>,
     pub data_txs: Vec<AccountTx>,          // rev 3: Data{Submit,Challenge,Vote}
+    pub scores: BTreeMap<String, u64>,     // rev 7: txid -> micro-nat held-out score
+}
+
+/// rev 7: a delta's score = its held-out loss improvement in micro-nats, >= 0,
+/// clamped by consensus so a lying proposer can't mint unbounded weight.
+pub const SCORE_CAP: u64 = 1_000_000_000;
+
+/// Canonical commitment to {txid: score}: sorted compact JSON, hashed. BTreeMap
+/// + serde_json compact output is byte-identical to the rig's
+/// `json.dumps(scores, sort_keys=True, separators=(",",":"))`.
+pub fn scores_root(scores: &BTreeMap<String, u64>) -> String {
+    crate::sha256_hex_pub(serde_json::to_string(scores).unwrap().as_bytes())
+}
+
+/// Consensus scores used for reward weighting: the committed score per txid,
+/// with a UNIFORM fallback (all 1) when every score is zero — an unscored block
+/// (bootstrap, eval timeout) still splits rewards equally rather than burning
+/// them. Deterministic from block content only. Mirrors rig effective_scores.
+pub fn effective_scores(txs: &[BackpropTx], scores: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+    let mut eff: BTreeMap<String, u64> = txs.iter()
+        .map(|t| { let id = t.txid(); let s = *scores.get(&id).unwrap_or(&0); (id, s) })
+        .collect();
+    if !eff.is_empty() && eff.values().all(|s| *s == 0) {
+        for v in eff.values_mut() {
+            *v = 1;
+        }
+    }
+    eff
 }
 
 impl Block {
@@ -95,6 +123,22 @@ pub fn validate_block(
     if txset_root(&ids) != h.txset_root {
         return Err(err("txset_root mismatch"));
     }
+    // 2b. DELTA SCORES (rev 7): exactly one committed score per included tx,
+    //     in [0, SCORE_CAP], and the commitment reproduces. Scores are block
+    //     data — validators never recompute the float eval (cross-GPU
+    //     nondeterminism stays outside consensus); a fraudulent score is a
+    //     bonded, challengeable claim.
+    let txid_set: BTreeSet<&String> = ids.iter().collect();
+    let score_keys: BTreeSet<&String> = block.scores.keys().collect();
+    if score_keys != txid_set {
+        return Err(err("scores must cover exactly the included txs"));
+    }
+    if block.scores.values().any(|v| *v > SCORE_CAP) {
+        return Err(err("score out of range"));
+    }
+    if scores_root(&block.scores) != h.score_root {
+        return Err(err("score_root mismatch"));
+    }
     // 3. weight-state transition reproduces the committed root
     let w = if block.txs.is_empty() {
         parent_w.to_vec()
@@ -139,19 +183,30 @@ pub fn validate_block(
             return Err(err("delta names no staked/available data (provenance required)"));
         }
     }
-    let hash_weight: std::collections::BTreeMap<String, u64> = led.registry.values()
+    // DELTA SCORING (rev 7): rewards are weighted by each delta's committed
+    // held-out-loss score. Miners: pool split ∝ their deltas' scores. Data: each
+    // delta's score splits equally across its named active corpora (scaled by
+    // 10_000 so integer division doesn't vanish small scores). All-zero scores
+    // fall back to uniform — deterministic from block content alone. Mirrors
+    // rig.blockchain.apply_ledger.
+    let eff = effective_scores(&block.txs, &block.scores);
+    let active_set: BTreeSet<String> = led.registry.values()
         .filter(|e| e["status"] == "active" && e["weight"].as_u64().unwrap_or(0) > 0)
-        .filter_map(|e| Some((e["data_hash"].as_str()?.to_string(), e["weight"].as_u64()?)))
+        .filter_map(|e| e["data_hash"].as_str().map(String::from))
         .collect();
-    let mut data_credits: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut miner_weights: BTreeMap<String, u64> = Default::default();
+    let mut data_credits: BTreeMap<String, u64> = Default::default();
     for tx in &block.txs {
-        for r in tx.canonical_refs() {
-            if let Some(w) = hash_weight.get(&r) {
-                *data_credits.entry(r).or_insert(0) += *w;
-            }
+        let s = eff[&tx.txid()];
+        *miner_weights.entry(tx.miner.clone()).or_insert(0) += s;
+        let named: Vec<String> = tx.canonical_refs().into_iter()
+            .filter(|r| active_set.contains(r)).collect();
+        for r in &named {
+            *data_credits.entry(r.clone()).or_insert(0) += s * 10_000 / named.len() as u64;
         }
     }
-    led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs, &data_credits);
+    led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs, &data_credits,
+                     &miner_weights);
     // lock each included delta's admission bond (after the reward, so this
     // block's reward can fund its bond); an unaffordable bond invalidates the block
     for tx in &block.txs {
@@ -208,6 +263,7 @@ pub fn genesis_header(genesis_w: &[i64]) -> Header {
         ledger_root: String::new(),
         data_root: String::new(),
         vrf_proof: String::new(),
+        score_root: String::new(),
     }
 }
 
