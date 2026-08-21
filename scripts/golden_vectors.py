@@ -143,8 +143,10 @@ def main():
 
     # --- token: address derivation + emission schedule ------------------------
     v["address"] = [{"pub_hex": key.pub, "address": address(key.pub)}]
+    # rev 6 schedule: 1M-block epochs, tail floor after epoch 9 (never zero)
     v["emission"] = [{"height": hh, "reward": emission(hh)}
-                     for hh in (0, 1, 100_000, 100_001, 200_001, 1_000_000)]
+                     for hh in (0, 1, 1_000_000, 1_000_001, 2_000_001,
+                                9_000_001, 10_000_000, 10**12)]
 
     # --- token: reward split + transfer apply + canonical ledger root ---------
     k2 = Key.generate(b"golden-vector-seed-second-key-0!")
@@ -278,6 +280,46 @@ def main():
         "balance_b": ledp.balance(address(owner_b.pub)),
         "miner_after": ledp.balance(address(miner_p.pub)),
         "root": ledp.root(),
+    }]
+
+    # --- fee flows (rev 6): 60/20/20 receipt split into the fee pools, then the
+    #     next block's reward drains them to its miners + named data owners.
+    ff_payer = Key.generate(b"fee-payer-0000000000000000000000")
+    ff_server = Key.generate(b"fee-server-000000000000000000000")
+    ff_miner = Key.generate(b"fee-miner-0000000000000000000000")
+    ff_owner = Key.generate(b"fee-owner-0000000000000000000000")
+    ledf = TokenLedger()
+    ledf.apply_reward(1, [ff_payer.pub], "genesis", [])   # fund the payer
+    ff_fee = 10_000
+    ff_rcpt = InferenceReceiptTx(payer_pub=ff_payer.pub,
+                                 server_addr=address(ff_server.pub), fee=ff_fee,
+                                 output_hash="cc" * 32, head_root="dd" * 32,
+                                 nonce=0).signed(ff_payer)
+    assert ledf.apply_data_tx(ff_rcpt, 1, set())
+    split_state = {
+        "server_after": ledf.balance(address(ff_server.pub)),
+        "fee_data_pool": ledf.fee_data_pool,
+        "fee_train_pool": ledf.fee_train_pool,
+        "root": ledf.root(),
+    }
+    ledf.registry["corpusF"] = {"owner": address(ff_owner.pub),
+                                "data_hash": "corpusF", "size": 0,
+                                "media_type": "text", "stake": 0, "weight": 1,
+                                "status": "active"}
+    ledf.apply_reward(2, [ff_miner.pub], "genesis", data_credits={"corpusF": 1})
+    v["fee_flows"] = [{
+        "payer_pub": ff_payer.pub, "server_addr": address(ff_server.pub),
+        "fee": ff_fee, "output_hash": "cc" * 32, "head_root": "dd" * 32,
+        "nonce": 0, "sig_hex": ff_rcpt.sig.hex(),
+        "after_receipt": split_state,
+        "owner_f": address(ff_owner.pub), "miner": ff_miner.pub,
+        "after_drain": {
+            "miner_after": ledf.balance(address(ff_miner.pub)),
+            "owner_after": ledf.balance(address(ff_owner.pub)),
+            "fee_data_pool": ledf.fee_data_pool,
+            "fee_train_pool": ledf.fee_train_pool,
+            "root": ledf.root(),
+        },
     }]
 
     # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----

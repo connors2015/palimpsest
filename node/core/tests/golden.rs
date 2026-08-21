@@ -219,6 +219,52 @@ fn data_provenance_matches_reference() {
     }
 }
 
+#[test]
+fn fee_flows_match_reference() {
+    // rev 6: an inference fee splits 60/20/20 (server instant, data + training
+    // slices into the ledger fee pools), and the NEXT block's reward drains the
+    // pools to its delta miners + provenance-named data owners.
+    use palimpsest_core::token::{address, AccountTx, InferenceReceiptTx, TokenLedger};
+    use std::collections::{BTreeMap, HashSet};
+    for case in vectors()["fee_flows"].as_array().unwrap() {
+        let payer = case["payer_pub"].as_str().unwrap();
+        let mut led = TokenLedger::new();
+        led.apply_reward(1, &[payer.to_string()], "genesis", &[], &Default::default());
+        let rcpt = AccountTx::InferenceReceipt(InferenceReceiptTx {
+            payer_pub: payer.into(),
+            server_addr: case["server_addr"].as_str().unwrap().into(),
+            fee: case["fee"].as_u64().unwrap(),
+            output_hash: case["output_hash"].as_str().unwrap().into(),
+            head_root: case["head_root"].as_str().unwrap().into(),
+            nonce: case["nonce"].as_u64().unwrap(),
+            sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
+        });
+        assert!(led.apply_data_tx(&rcpt, 1, &HashSet::new()), "receipt must apply");
+        let s = &case["after_receipt"];
+        assert_eq!(led.balance(case["server_addr"].as_str().unwrap()),
+                   s["server_after"].as_u64().unwrap(), "server paid 60% + dust");
+        assert_eq!(led.fee_data_pool, s["fee_data_pool"].as_u64().unwrap());
+        assert_eq!(led.fee_train_pool, s["fee_train_pool"].as_u64().unwrap());
+        assert_eq!(led.root(), s["root"].as_str().unwrap(), "post-receipt root");
+        // register the corpus, then the next block drains both pools
+        led.registry.insert("corpusF".into(), serde_json::json!({
+            "owner": case["owner_f"].as_str().unwrap(), "data_hash": "corpusF",
+            "size": 0, "media_type": "text", "stake": 0,
+            "weight": 1, "status": "active"}));
+        let credits: BTreeMap<String, u64> = [("corpusF".to_string(), 1u64)].into();
+        let miner = case["miner"].as_str().unwrap();
+        led.apply_reward(2, &[miner.to_string()], "genesis", &[], &credits);
+        let d = &case["after_drain"];
+        assert_eq!(led.balance(&address(miner)),
+                   d["miner_after"].as_u64().unwrap(), "miner share + train pool");
+        assert_eq!(led.balance(case["owner_f"].as_str().unwrap()),
+                   d["owner_after"].as_u64().unwrap(), "data share + data pool");
+        assert_eq!(led.fee_data_pool, d["fee_data_pool"].as_u64().unwrap());
+        assert_eq!(led.fee_train_pool, d["fee_train_pool"].as_u64().unwrap());
+        assert_eq!(led.root(), d["root"].as_str().unwrap(), "post-drain root");
+    }
+}
+
 fn data_tx_from(kind: &str, t: &Value) -> palimpsest_core::token::AccountTx {
     use palimpsest_core::token::*;
     let sig = hex::decode(t["sig_hex"].as_str().unwrap()).unwrap();

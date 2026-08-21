@@ -12,11 +12,22 @@ use std::collections::BTreeMap;
 
 pub const GRAIN: u64 = 1_000_000_000;
 pub const BASE_REWARD: u64 = 50 * GRAIN;
-pub const HALVING_BLOCKS: u64 = 100_000;
-pub const SUNSET_HEIGHT: u64 = 1_000_000;
+// rev 6: 1M-block epochs (~2yrs at 60s blocks) + TAIL EMISSION instead of a
+// hard sunset — the reward floors at the final epoch's value forever, a
+// perpetual training wage (inflation asymptotes to ~0%/yr).
+pub const HALVING_BLOCKS: u64 = 1_000_000;
+pub const TAIL_EPOCH: u64 = 9;
+pub const TAIL_REWARD: u64 = BASE_REWARD >> TAIL_EPOCH;
 pub const SHARE_MINERS: u64 = 7_000;
 pub const SHARE_PROPOSER: u64 = 1_000;
 pub const SHARE_DATA: u64 = 2_000;
+// rev 6: inference-fee split (basis points, sum 10_000). Server paid instantly
+// (absorbs division dust — supply-exact); data + training slices accumulate in
+// the ledger fee pools, drained each block to provenance-named data owners and
+// delta miners. Usage revenue funds training + data, not just serving.
+pub const FEE_SHARE_SERVER: u64 = 6_000;
+pub const FEE_SHARE_DATA: u64 = 2_000;
+pub const FEE_SHARE_TRAIN: u64 = 2_000;
 pub const CHALLENGE_WINDOW: u64 = 20;
 pub const PROPOSER_LOOKBACK: usize = 32;
 pub const GENESIS_DATA_WEIGHT: u64 = 1_000_000;
@@ -32,12 +43,13 @@ pub fn address(pub_hex: &str) -> String {
     hex::encode(&Sha256::digest(&bytes)[..20])
 }
 
-/// Deterministic block reward: halves every HALVING_BLOCKS, zero at/after sunset.
+/// Deterministic block reward: halves every HALVING_BLOCKS, then floors at
+/// TAIL_REWARD forever (tail emission — never zero for h >= 1).
 pub fn emission(height: u64) -> u64 {
-    if height < 1 || height >= SUNSET_HEIGHT {
+    if height < 1 {
         return 0;
     }
-    BASE_REWARD >> ((height - 1) / HALVING_BLOCKS)
+    (BASE_REWARD >> ((height - 1) / HALVING_BLOCKS).min(62)).max(TAIL_REWARD)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +242,11 @@ pub struct TokenLedger {
     pub registry: BTreeMap<String, Value>,   // data_id -> entry object
     pub challenges: BTreeMap<String, Value>, // challenge_id -> challenge object
     pub bonds: BTreeMap<String, Value>,      // delta_txid -> {miner, amount, expiry}
+    // rev 6: inference-fee slices awaiting distribution — the data slice drains
+    // to the next block's provenance-named data owners, the training slice to
+    // its delta miners. Consensus state (in root + supply).
+    pub fee_data_pool: u64,
+    pub fee_train_pool: u64,
 }
 
 impl TokenLedger {
@@ -250,11 +267,11 @@ impl TokenLedger {
 
     fn credit(&mut self, addr: &str, amount: u64) {
         if amount > 0 {
-            // saturating guard: total emission is capped far below u64::MAX
-            // (SUNSET_HEIGHT × BASE_REWARD ≈ 5e16 ≪ 1.8e19), so a single balance
-            // can never actually reach the ceiling — this is a can't-happen
-            // defense that stays deterministic instead of panicking/wrapping if
-            // the emission constants ever change.
+            // saturating guard: schedule supply is capped far below u64::MAX
+            // (10 epochs × HALVING_BLOCKS × BASE_REWARD ≈ 1e17, plus a ~5e13/yr
+            // tail ≪ 1.8e19), so a single balance can never actually reach the
+            // ceiling — this is a can't-happen defense that stays deterministic
+            // instead of panicking/wrapping if the emission constants change.
             let bal = self.balances.entry(addr.to_string()).or_insert(0);
             *bal = bal.saturating_add(amount);
         }
@@ -271,12 +288,19 @@ impl TokenLedger {
                         proposer_pub: &str, legacy_data_addrs: &[String],
                         data_credits: &BTreeMap<String, u64>) {
         let total = emission(height);
-        if total == 0 {
+        if total == 0 && self.fee_train_pool == 0 && self.fee_data_pool == 0 {
             return;
         }
-        let miners_pool = total * SHARE_MINERS / 10_000;
+        let mut miners_pool = total * SHARE_MINERS / 10_000;
         let proposer_cut = total * SHARE_PROPOSER / 10_000;
-        let data_pool = total * SHARE_DATA / 10_000;
+        let mut data_pool = total * SHARE_DATA / 10_000;
+        // rev 6: drain the fee pools into this block's payouts when they have
+        // recipients (a block without miners / named data carries them forward).
+        // Division dust is burned, same doctrine as emission dust.
+        if !miner_pubs.is_empty() && self.fee_train_pool > 0 {
+            miners_pool = miners_pool.saturating_add(self.fee_train_pool);
+            self.fee_train_pool = 0;
+        }
         if !miner_pubs.is_empty() {
             let each = miners_pool / miner_pubs.len() as u64;
             let mut sorted: Vec<&String> = miner_pubs.iter().collect();
@@ -303,6 +327,10 @@ impl TokenLedger {
             .filter(|(h, w)| **w > 0 && hash_to_owner.contains_key(*h))
             .map(|(h, w)| (h, *w))
             .collect();
+        if !paid.is_empty() && self.fee_data_pool > 0 {
+            data_pool = data_pool.saturating_add(self.fee_data_pool);
+            self.fee_data_pool = 0;
+        }
         if !paid.is_empty() {
             paid.sort();                                   // by data_hash, canonical
             let wsum: u128 = paid.iter().map(|(_, w)| *w as u128).sum();
@@ -461,14 +489,22 @@ impl TokenLedger {
                 arr.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
             }
             AccountTx::InferenceReceipt(t) => {
-                // a signed usage fee: payer pays the serving node for an attested
-                // inference (the on-chain payment + receipt; attestation is
-                // off-chain, disputed via the challenge market).
+                // a signed usage fee: the payer pays for an attested inference.
+                // rev 6: the fee splits 60/20/20 — the serving node is paid
+                // instantly (absorbing division dust, keeping the split
+                // supply-exact); the data + training slices accumulate in the
+                // fee pools, drained by the next block's reward to its
+                // provenance-named data owners + delta miners. Mirrors
+                // rig.token.apply_data_tx.
                 if t.fee == 0 || self.balance(&src) < t.fee {
                     return false;
                 }
                 *self.balances.get_mut(&src).unwrap() -= t.fee;
-                self.credit(&t.server_addr, t.fee);
+                let data_cut = t.fee * FEE_SHARE_DATA / 10_000;
+                let train_cut = t.fee * FEE_SHARE_TRAIN / 10_000;
+                self.credit(&t.server_addr, t.fee - data_cut - train_cut);
+                self.fee_data_pool = self.fee_data_pool.saturating_add(data_cut);
+                self.fee_train_pool = self.fee_train_pool.saturating_add(train_cut);
             }
             AccountTx::Transfer(_) => return false,
         }
@@ -483,6 +519,8 @@ impl TokenLedger {
             "balances": self.balances,
             "bonds": self.bonds,
             "challenges": self.challenges,
+            "fee_data_pool": self.fee_data_pool,
+            "fee_train_pool": self.fee_train_pool,
             "nonces": self.nonces,
             "registry": self.registry,
         });
@@ -490,7 +528,8 @@ impl TokenLedger {
     }
 
     pub fn supply(&self) -> u64 {
-        self.balances.values().sum()
+        // pool balances are minted/paid tokens in flight, so they count
+        self.balances.values().sum::<u64>() + self.fee_data_pool + self.fee_train_pool
     }
 
     /// Serialize the full ledger for a snapshot (fast-boot). Structural, not the
@@ -500,6 +539,8 @@ impl TokenLedger {
             "balances": self.balances, "nonces": self.nonces,
             "registry": self.registry, "challenges": self.challenges,
             "bonds": self.bonds,
+            "fee_data_pool": self.fee_data_pool,
+            "fee_train_pool": self.fee_train_pool,
         })
     }
 
@@ -539,6 +580,18 @@ impl TokenLedger {
                     return None;
                 }
                 led.bonds.insert(k.clone(), b.clone());
+            }
+        }
+        // fee pools (rev 6) are optional for pre-rev-6 snapshots (default 0),
+        // but if present they must be plain u64 — anything else is malformed.
+        for key in ["fee_data_pool", "fee_train_pool"] {
+            if let Some(x) = v.get(key) {
+                let n = x.as_u64()?;
+                if key == "fee_data_pool" {
+                    led.fee_data_pool = n;
+                } else {
+                    led.fee_train_pool = n;
+                }
             }
         }
         Some(led)
