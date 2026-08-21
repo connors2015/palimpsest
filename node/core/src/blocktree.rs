@@ -166,21 +166,34 @@ pub struct BlockTree {
     pub prune_depth: Option<u64>,
 }
 
+/// The genesis header for an initial weight vector — the network's shared trust
+/// anchor. Its block_hash is the genesis id; a joining node fetches the genesis
+/// weights from a peer and verifies `genesis_block_hash(w)` equals the published
+/// id before adopting them, so the genesis is public + self-verifying.
+pub fn genesis_header(genesis_w: &[i64]) -> Header {
+    Header {
+        height: 0,
+        prev_hash: "0".repeat(64),
+        state_root: state_root(genesis_w),
+        txset_root: crate::sha256_hex_pub(b""),
+        n_txs: 0,
+        work: 0,
+        proposer: "genesis".into(),
+        transfer_root: String::new(),
+        ledger_root: String::new(),
+        data_root: String::new(),
+        vrf_proof: String::new(),
+    }
+}
+
+/// The genesis block id (hash) for an initial weight vector.
+pub fn genesis_block_hash(genesis_w: &[i64]) -> String {
+    genesis_header(genesis_w).block_hash()
+}
+
 impl BlockTree {
     pub fn new(genesis_w: Vec<i64>, data_contributor: Option<String>) -> Self {
-        let gh = Header {
-            height: 0,
-            prev_hash: "0".repeat(64),
-            state_root: state_root(&genesis_w),
-            txset_root: crate::sha256_hex_pub(b""),
-            n_txs: 0,
-            work: 0,
-            proposer: "genesis".into(),
-            transfer_root: String::new(),
-            ledger_root: String::new(),
-            data_root: String::new(),
-            vrf_proof: String::new(),
-        };
+        let gh = genesis_header(&genesis_w);
         let ghash = gh.block_hash();
         let mut t = BlockTree {
             blocks: HashMap::new(),

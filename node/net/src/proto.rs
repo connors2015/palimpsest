@@ -304,6 +304,10 @@ pub enum Gossip {
 pub struct SyncRequest {
     pub from_height: u64,
     pub count: u64,
+    /// a fresh node with no genesis asks for it here — served + self-verified
+    /// against the published genesis id, so the genesis is public + fetchable.
+    #[serde(default)]
+    pub want_genesis: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -311,6 +315,9 @@ pub struct SyncResponse {
     pub blocks: Vec<StoredBlock>,
     pub payloads: HashMap<String, Payload>, // txid -> payload for those blocks
     pub head_height: u64,
+    /// the genesis weight vector, included when the requester set want_genesis
+    #[serde(default)]
+    pub genesis: Option<Vec<i64>>,
 }
 
 /// Data-availability shard exchange (§3.3). A node missing a body asks peers for

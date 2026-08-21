@@ -42,6 +42,9 @@ struct Args {
     key_file: String,        // path to a 0600 file holding a 32-byte hex seed
     #[arg(long, default_value = "")]
     genesis_file: String,    // raw i64-LE genesis vector (ceremony artifact)
+    #[arg(long, default_value = "")]
+    genesis_hash: String,    // published genesis id; a fresh node fetches +
+                             // verifies the genesis from a peer against this
     #[arg(long, default_value_t = 0)]
     toy_dim: usize,          // devnet: deterministic toy genesis of this size
     #[arg(long, default_value_t = 7900)]
@@ -143,22 +146,71 @@ fn load_identity(args: &Args) -> [u8; 32] {
     panic!("identity required: --key-file, PALIMPSEST_KEY_SEED, or --wallet");
 }
 
-fn load_genesis(args: &Args, store: &store::Store) -> Vec<i64> {
+/// Resolve the genesis weights: local disk (durable) -> --genesis-file ->
+/// --toy-dim -> FETCH from a peer, verified against the published --genesis-hash.
+/// The genesis is public + self-verifying, so a fresh node bootstraps from a
+/// single peer address plus the (tiny) published genesis id.
+async fn resolve_genesis(args: &Args, store: &store::Store,
+                         swarm: &mut libp2p::Swarm<node::Behaviour>) -> Vec<i64> {
     if let Some(g) = store.read_genesis() {
-        return g;                                   // durable once written
+        return g; // durable once written
     }
     let g: Vec<i64> = if !args.genesis_file.is_empty() {
         let raw = std::fs::read(&args.genesis_file).expect("genesis file unreadable");
-        raw.chunks_exact(8)
-            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
-            .collect::<Vec<i64>>()
+        raw.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
     } else if args.toy_dim > 0 {
-        (0..args.toy_dim as i64).map(|i| i * 100).collect::<Vec<i64>>()
+        (0..args.toy_dim as i64).map(|i| i * 100).collect()
+    } else if !args.genesis_hash.is_empty() {
+        info!(id = %args.genesis_hash, "no local genesis — fetching it from the network");
+        fetch_genesis(swarm, &args.genesis_hash, &args.peers).await
+            .expect("could not fetch a genesis matching --genesis-hash from any peer")
     } else {
-        panic!("genesis required: --genesis-file or --toy-dim");
+        panic!("genesis required: --genesis-file, --toy-dim, or --genesis-hash + --peers");
     };
     store.write_genesis(&g).expect("cannot persist genesis");
     g
+}
+
+/// Fetch the genesis weights from a peer and verify they hash to the expected
+/// genesis id before adopting them (so a malicious peer can't seed a wrong
+/// genesis). Times out after a few minutes with no matching response.
+async fn fetch_genesis(swarm: &mut libp2p::Swarm<node::Behaviour>,
+                       expected_hash: &str, peers: &str) -> Option<Vec<i64>> {
+    use futures::StreamExt;
+    use libp2p::{request_response, swarm::SwarmEvent};
+    let start = std::time::Instant::now();
+    let mut ticker = tokio::time::interval(Duration::from_secs(3));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let connected: Vec<_> = swarm.connected_peers().copied().collect();
+                if connected.is_empty() {
+                    node::dial_peers(swarm, peers);
+                }
+                for p in connected {
+                    swarm.behaviour_mut().sync.send_request(&p, proto::SyncRequest {
+                        from_height: 0, count: 0, want_genesis: true });
+                }
+                if start.elapsed().as_secs() > 180 {
+                    return None;
+                }
+            }
+            ev = swarm.select_next_some() => {
+                if let SwarmEvent::Behaviour(node::BehaviourEvent::Sync(
+                    request_response::Event::Message {
+                        message: request_response::Message::Response { response, .. }, .. })) = ev
+                {
+                    if let Some(w) = response.genesis {
+                        if core::blocktree::genesis_block_hash(&w) == expected_hash {
+                            info!(dim = w.len(), "fetched + verified genesis from a peer");
+                            return Some(w);
+                        }
+                        warn!("a peer served a genesis that doesn't match the published id");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -175,26 +227,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(miner = &consensus_key.pub_hex()[..12], "identity loaded");
 
     let store = store::Store::open(&args.data_dir)?;
-    let _genesis = load_genesis(&args, &store);  // side effect: persists genesis.bin
     let dc = (!args.data_contributor.is_empty()).then(|| args.data_contributor.clone());
 
-    // replay any existing chain from disk (validated)
-    let (tree, blocks_full, payloads) = store
-        .replay(dc.clone(), args.prune_depth)
-        .expect("chain replay failed");
-
-    // Guarantee a current-format snapshot at the replayed head, so the NEXT
-    // boot is a fast-boot even for an idle watcher that never advances to a
-    // SNAPSHOT_EVERY height. Skips the write if disk already has one at head.
-    if !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
-        let head = tree.head.clone();
-        let height = tree.blocks[&head].height;
-        store.write_snapshot(&head, height, &tree.state[&head], tree.head_ledger());
-        info!(height, "wrote boot snapshot for fast-boot");
-    }
-
     // swarm with the full NAT stack: QUIC+TCP, Noise, relay client, AutoNAT,
-    // DCUtR hole punching, optional relay server (seeds)
+    // DCUtR hole punching, optional relay server (seeds). Built BEFORE genesis
+    // so a fresh node can fetch the genesis from a peer.
     let relay_server = args.relay_server;
     let mut swarm = SwarmBuilder::with_existing_identity(p2p_key)
         .with_tokio()
@@ -219,6 +256,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     node::dial_peers(&mut swarm, &args.peers);
+
+    // genesis: local disk -> --genesis-file -> --toy-dim -> FETCH from a peer,
+    // verified against the published --genesis-hash. The genesis is public and
+    // self-verifying, so a fresh node bootstraps from one peer + the id.
+    resolve_genesis(&args, &store, &mut swarm).await;
+
+    // replay any existing chain from disk (validated)
+    let (tree, blocks_full, payloads) = store
+        .replay(dc.clone(), args.prune_depth)
+        .expect("chain replay failed");
+
+    // Guarantee a current-format snapshot at the replayed head, so the NEXT
+    // boot is a fast-boot even for an idle watcher that never advances to a
+    // SNAPSHOT_EVERY height. Skips the write if disk already has one at head.
+    if !matches!(store.read_snapshot(), Some((h, ..)) if h == tree.head) {
+        let head = tree.head.clone();
+        let height = tree.blocks[&head].height;
+        store.write_snapshot(&head, height, &tree.state[&head], tree.head_ledger());
+        info!(height, "wrote boot snapshot for fast-boot");
+    }
 
     // channels: api <-> node, bridge <-> node
     let (api_tx, api_rx) = mpsc::channel(64);

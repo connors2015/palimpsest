@@ -576,6 +576,7 @@ impl Node {
                 let req = SyncRequest {
                     from_height: sb.header.height.saturating_sub(1),
                     count: 32,
+                    want_genesis: false,
                 };
                 swarm.behaviour_mut().sync.send_request(&peer, req);
                 self.queue_pending(bh, sb, peer);
@@ -625,6 +626,7 @@ impl Node {
                         let req = SyncRequest {
                             from_height: self.head_height().saturating_sub(8),
                             count: 64,
+                            want_genesis: false,
                         };
                         swarm.behaviour_mut().sync.send_request(&peer, req);
                         self.queue_pending(bh, sb, peer);
@@ -1131,7 +1133,8 @@ pub async fn run(
                                     info!(peer = %propagation_source, their_h = height,
                                           from, "unknown head — requesting sync");
                                     let req = SyncRequest {
-                                        from_height: from, count: SYNC_MAX_BLOCKS as u64 };
+                                        from_height: from, count: SYNC_MAX_BLOCKS as u64,
+                                        want_genesis: false };
                                     swarm.behaviour_mut().sync
                                         .send_request(&propagation_source, req);
                                 }
@@ -1183,9 +1186,18 @@ pub async fn run(
                             }
                             info!(from = request.from_height, served = chain.len(),
                                   kb = bytes / 1024, "serving sync request");
+                            // a fresh node bootstraps the genesis from us — the
+                            // shared trust anchor, self-verified by the requester
+                            // against the published genesis id.
+                            let genesis = if request.want_genesis {
+                                node.tree.state.get(&node.tree.genesis_hash).cloned()
+                            } else {
+                                None
+                            };
                             let resp = SyncResponse {
                                 blocks: chain, payloads,
                                 head_height: node.head_height(),
+                                genesis,
                             };
                             let _ = swarm.behaviour_mut().sync
                                 .send_response(channel, resp);
@@ -1272,6 +1284,7 @@ pub async fn run(
                     // heights we already have, not just above them
                     let req = SyncRequest {
                         from_height: node.head_height().saturating_sub(8), count: 64,
+                        want_genesis: false,
                     };
                     swarm.behaviour_mut().sync.send_request(&peer_id, req);
                 }
