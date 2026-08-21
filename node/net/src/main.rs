@@ -248,7 +248,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval: args.interval,
             rotate,
             seconds: args.seconds,
-            data_contributor: dc,
             peers: args.peers.clone(),
         },
         topic,

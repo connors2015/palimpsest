@@ -207,7 +207,6 @@ pub struct NodeConfig {
     pub interval: f64,
     pub rotate: Option<(u64, u64)>, // (n, id): deterministic devnet rotation
     pub seconds: f64,               // 0 = run forever
-    pub data_contributor: Option<String>,
     pub peers: String,              // configured peers — re-dialed when lost
 }
 

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The consensus core + node: must build warning-clean, pass all tests.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - name: build (warnings are errors)
+        working-directory: node
+        run: cargo build --release --all-targets
+        env:
+          RUSTFLAGS: "-D warnings"
+      - name: test
+        working-directory: node
+        run: cargo test --all
+      # clippy + fmt are advisory until a repo-wide normalization pass lands
+      - name: clippy (advisory)
+        working-directory: node
+        run: cargo clippy --all-targets || true
+      - name: fmt check (advisory)
+        working-directory: node
+        run: cargo fmt --check || true
+
+  # The Python rig is the SPEC. Regenerate the golden vectors and assert the
+  # committed file is byte-identical — this is what pins the Rust node to the
+  # reference. A drift here means Rust and Python disagree.
+  golden-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: regenerate golden vectors from the Python reference
+        run: uv run --python 3.11 --with numpy --with pynacl python -m scripts.golden_vectors
+      - name: assert golden.json is unchanged (Rust == Python spec)
+        run: git diff --exit-code node/vectors/golden.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: node
+      - name: rust reproduces every golden vector
+        working-directory: node
+        run: cargo test --test golden
+
+  # The reference test suite. Advisory until the suite is pinned + green
+  # (tracked separately); surfaces regressions in the rig without blocking.
+  python-rig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: pytest (advisory)
+        run: |
+          uv run --python 3.11 --with numpy --with pynacl --with pytest \
+            python -m pytest tests/ -q || true

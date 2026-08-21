@@ -67,20 +67,6 @@ pub struct SparseI64 {
     pub val: String,
 }
 
-impl SparseI64 {
-    pub fn dense(&self) -> Option<Vec<i64>> {
-        let idx = unb64(&self.idx)?;
-        let val = unb64(&self.val)?;
-        let mut out = vec![0i64; self.n];
-        for i in 0..idx.len() / 4 {
-            let j = u32::from_le_bytes(idx[i * 4..i * 4 + 4].try_into().ok()?) as usize;
-            let v = i64::from_le_bytes(val[i * 8..i * 8 + 8].try_into().ok()?);
-            out[j] = v;
-        }
-        Some(out)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Commitment-only stored blocks (what gossips, persists, and syncs)
 // ---------------------------------------------------------------------------
