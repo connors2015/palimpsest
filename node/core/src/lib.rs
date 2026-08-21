@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 pub mod blocktree;
 pub mod capacity;
 pub mod da;
+pub mod lottery;
 pub mod token;
 
 pub const SCALE: f64 = 65536.0; // 1 << 16 fixed-point scale

@@ -227,6 +227,22 @@ def main():
         "proof": [[side, sib.hex()] for side, sib in pf],
     }]
 
+    # --- proposer lottery (§7.4 interim): verifiable stake-weighted sortition -
+    from rig import lottery as _lot
+    lot_prev, lot_h = "ab" * 32, 42
+    lot_cases = []
+    for stake, total in [(1_000_000_000, 1_000_000_000), (1, 10**18)]:
+        proof = _lot.vrf_prove(key, lot_prev, lot_h)
+        lot_cases.append({
+            "pub": key.pub, "seed_hex": key.sk.hex(),
+            "prev_hash": lot_prev, "height": lot_h,
+            "stake": stake, "total_stake": total,
+            "proof_sig_hex": proof.hex(),
+            "vrf_output_hex": _lot.vrf_output(proof).to_bytes(32, "big").hex(),
+            "eligible": _lot.eligible(key.pub, proof, lot_prev, lot_h, stake, total),
+        })
+    v["lottery"] = lot_cases
+
     # --- capacity retarget (§9.4a): the deterministic decision trace ----------
     from rig.capacity import CapacityRetarget
     ctrl = CapacityRetarget()

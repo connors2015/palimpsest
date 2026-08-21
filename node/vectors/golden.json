@@ -954,6 +954,30 @@
    ]
   }
  ],
+ "lottery": [
+  {
+   "pub": "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
+   "seed_hex": "5f4ab179e9119d05bfa313d90711a55828eebd0c08947b3692cba21ee6a45ad1",
+   "prev_hash": "abababababababababababababababababababababababababababababababab",
+   "height": 42,
+   "stake": 1000000000,
+   "total_stake": 1000000000,
+   "proof_sig_hex": "b08b294a9bfb7b3bf2d5eed9a3ba583d1554bd594a0582bc2055332d774dd7b0b3ec9ea032c8814e0b9aa40840aa8cace51069e9333be78743a36978779c1b03",
+   "vrf_output_hex": "5afc3e0eaa5fffa56ae838f06707cdce98932ba5424c96a9e0acba233a924d59",
+   "eligible": true
+  },
+  {
+   "pub": "e2f1a1d2f62766016b14adf58b3eb6484c51cea31cb34dc92659ddf783f94a64",
+   "seed_hex": "5f4ab179e9119d05bfa313d90711a55828eebd0c08947b3692cba21ee6a45ad1",
+   "prev_hash": "abababababababababababababababababababababababababababababababab",
+   "height": 42,
+   "stake": 1,
+   "total_stake": 1000000000000000000,
+   "proof_sig_hex": "b08b294a9bfb7b3bf2d5eed9a3ba583d1554bd594a0582bc2055332d774dd7b0b3ec9ea032c8814e0b9aa40840aa8cace51069e9333be78743a36978779c1b03",
+   "vrf_output_hex": "5afc3e0eaa5fffa56ae838f06707cdce98932ba5424c96a9e0acba233a924d59",
+   "eligible": false
+  }
+ ],
  "capacity": [
   {
    "windows": [

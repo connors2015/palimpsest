@@ -365,3 +365,30 @@ fn capacity_retarget_matches_reference() {
         }
     }
 }
+
+#[test]
+fn lottery_matches_reference() {
+    use palimpsest_core::{lottery, Key};
+    for case in vectors()["lottery"].as_array().unwrap() {
+        let pub_hex = case["pub"].as_str().unwrap();
+        let prev = case["prev_hash"].as_str().unwrap();
+        let h = case["height"].as_u64().unwrap();
+        // reprove the VRF from the secret: Rust must produce the same proof
+        let seed: [u8; 32] = hex::decode(case["seed_hex"].as_str().unwrap())
+            .unwrap().try_into().unwrap();
+        let key = Key::from_seed(seed);
+        let proof = lottery::vrf_prove(&key, prev, h);
+        assert_eq!(hex::encode(&proof), case["proof_sig_hex"].as_str().unwrap(),
+                   "VRF proof (deterministic Ed25519) must match");
+        assert_eq!(hex::encode(lottery::vrf_output(&proof)),
+                   case["vrf_output_hex"].as_str().unwrap(), "VRF output");
+        let stake = case["stake"].as_u64().unwrap();
+        let total = case["total_stake"].as_u64().unwrap();
+        assert_eq!(lottery::eligible(pub_hex, &proof, prev, h, stake, total),
+                   case["eligible"].as_bool().unwrap(),
+                   "stake-weighted eligibility (stake {stake}/{total})");
+        // a forged proof (wrong signer) is never eligible
+        assert!(!lottery::eligible("00".repeat(32).as_str(), &proof, prev, h, stake, total),
+                "eligibility must reject a proof that doesn't verify");
+    }
+}
