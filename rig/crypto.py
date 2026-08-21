@@ -79,12 +79,13 @@ class BackpropTx:
     shard_id: int
     delta_hash: str       # sha256 of the delta body bytes
     da_pointer: str       # where the body can be fetched (DA layer key)
+    bond: int = 0         # rev 4: stake bond the miner locks to submit (grains)
     sig: bytes = b""
 
     def signing_bytes(self) -> bytes:
         return frame(b"backprop", self.miner.encode(), str(self.base_height).encode(),
                      str(self.shard_id).encode(), self.delta_hash.encode(),
-                     self.da_pointer.encode())
+                     self.da_pointer.encode(), str(self.bond).encode())
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()

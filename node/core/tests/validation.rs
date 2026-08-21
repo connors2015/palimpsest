@@ -100,6 +100,7 @@ fn rejects_wrong_length_delta_body() {
         shard_id: 0,
         delta_hash: dh.clone(),
         da_pointer: format!("da://{dh}"),
+        bond: 0,
         sig: vec![],
     };
     tx.sig = key.sign(&tx.signing_bytes());

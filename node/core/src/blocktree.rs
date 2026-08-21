@@ -123,9 +123,17 @@ pub fn validate_block(
     }
     let mut led = parent_ledger.clone();
     led.resolve_expired_challenges(h.height);
+    led.resolve_expired_bonds(h.height); // return matured delta bonds first
     let miner_pubs: Vec<String> = block.txs.iter().map(|t| t.miner.clone()).collect();
     let data_addrs: Vec<String> = data_contributor.map(|d| vec![d.to_string()]).unwrap_or_default();
     led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs);
+    // lock each included delta's admission bond (after the reward, so this
+    // block's reward can fund its bond); an unaffordable bond invalidates the block
+    for tx in &block.txs {
+        if !led.lock_bond(&tx.txid(), &crate::token::address(&tx.miner), tx.bond, h.height) {
+            return Err(err("miner cannot afford delta bond"));
+        }
+    }
     let mut merged: Vec<AccountTx> = block.data_txs.clone();
     merged.extend(block.transfers.iter().cloned().map(AccountTx::Transfer));
     for tx in canonical_account_txs(&merged) {

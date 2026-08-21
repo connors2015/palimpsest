@@ -46,6 +46,8 @@ CHALLENGE_QUORUM = 3               # min affirmative juror votes to uphold a
                                    # challenge — one juror must never be able to
                                    # seize an owner's stake; below quorum the
                                    # challenge is rejected (safe default)
+BOND_WINDOW = 20                   # blocks a delta's admission bond stays locked
+                                   # (slashable for fraud) before it is returned
 
 
 def address(pub_hex: str) -> str:
@@ -185,6 +187,10 @@ class TokenLedger:
         # challenge_id -> {data_id, challenger, stake, reason, expiry,
         #                  votes_for: [addr…], votes_against: [addr…]}
         self.challenges: dict[str, dict] = {}
+        # delta_txid -> {miner, amount, expiry} — stake bonds locked behind
+        # included deltas (the admission cost; slashable for proven fraud,
+        # otherwise returned at maturity). §4.1
+        self.bonds: dict[str, dict] = {}
 
     def copy(self) -> "TokenLedger":
         led = TokenLedger()
@@ -194,6 +200,7 @@ class TokenLedger:
         led.challenges = {k: {**v, "votes_for": list(v["votes_for"]),
                               "votes_against": list(v["votes_against"])}
                           for k, v in self.challenges.items()}
+        led.bonds = {k: dict(v) for k, v in self.bonds.items()}
         return led
 
     def seed_genesis_data(self, owner_addr: str, data_hash: str = "genesis"):
@@ -247,6 +254,31 @@ class TokenLedger:
             each = data_pool // len(data_addrs)
             for addr in sorted(data_addrs):
                 self._credit(addr, each)
+
+    # ---- delta admission bonds (rev 4) ----------------------------------
+    def resolve_expired_bonds(self, height: int):
+        """Return every stake bond whose lock window has closed, in sorted txid
+        order (deterministic). A bond slashed by a proven-fraud challenge is
+        removed before maturity elsewhere; the rest come back to the miner."""
+        for tid in sorted(self.bonds):
+            b = self.bonds[tid]
+            if b["expiry"] <= height:
+                self._credit(b["miner"], b["amount"])
+                del self.bonds[tid]
+
+    def lock_bond(self, delta_txid: str, miner_addr: str, amount: int, height: int) -> bool:
+        """Lock a delta's admission bond from the miner's balance — the Bitcoin
+        analog of paying to participate, but recoverable. Returns False (block
+        invalid) if the miner can't afford it. A zero bond is a no-op, so the
+        fair-launch bootstrap (miners with no balance yet) still works."""
+        if amount <= 0:
+            return True
+        if self.balances.get(miner_addr, 0) < amount:
+            return False
+        self.balances[miner_addr] -= amount
+        self.bonds[delta_txid] = {"miner": miner_addr, "amount": amount,
+                                  "expiry": height + BOND_WINDOW}
+        return True
 
     # ---- data lane (rev 3) ----------------------------------------------
     def resolve_expired_challenges(self, height: int):
@@ -355,8 +387,9 @@ class TokenLedger:
         """Canonical ledger root: sorted compact JSON over the FULL token state
         (balances, nonces, data registry, open challenges). sort_keys sorts every
         nested dict; vote lists are kept sorted at mutation time."""
-        blob = json.dumps({"balances": self.balances, "challenges": self.challenges,
-                           "nonces": self.nonces, "registry": self.registry},
+        blob = json.dumps({"balances": self.balances, "bonds": self.bonds,
+                           "challenges": self.challenges, "nonces": self.nonces,
+                           "registry": self.registry},
                           sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(blob).hexdigest()
 

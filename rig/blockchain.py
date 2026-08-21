@@ -93,9 +93,17 @@ def apply_ledger(parent_ledger: TokenLedger, block: Block,
     led = parent_ledger.copy()
     h = block.header.height
     led.resolve_expired_challenges(h)
+    led.resolve_expired_bonds(h)        # return matured delta bonds first
     led.apply_reward(h, miner_pubs=[tx.miner for tx in block.txs],
                      proposer_pub=block.header.proposer,
                      data_addrs=[data_contributor] if data_contributor else [])
+    # lock each included delta's admission bond from its miner's balance (after
+    # the reward, so this block's reward can fund this block's bond). A miner who
+    # can't afford the bond it committed to makes the block invalid.
+    from .token import address as _addr
+    for tx in block.txs:
+        if not led.lock_bond(tx.txid(), _addr(tx.miner), getattr(tx, "bond", 0), h):
+            raise ValidationError(f"miner cannot afford delta bond {tx.txid()[:8]}")
     for tx in canonical_account_txs(block.data_txs, block.transfers):
         if isinstance(tx, TransferTx):
             if not tx.verify():

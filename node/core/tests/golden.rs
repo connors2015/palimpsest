@@ -89,6 +89,7 @@ fn backprop_tx_matches_reference() {
             shard_id: case["shard_id"].as_u64().unwrap(),
             delta_hash: case["delta_hash"].as_str().unwrap().into(),
             da_pointer: case["da_pointer"].as_str().unwrap().into(),
+            bond: case["bond"].as_u64().unwrap_or(0),
             sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
         };
         assert_eq!(hex::encode(tx.signing_bytes()),
@@ -274,6 +275,7 @@ fn full_chain_replay_matches_reference() {
                     shard_id: t["shard_id"].as_u64().unwrap(),
                     delta_hash: t["delta_hash"].as_str().unwrap().into(),
                     da_pointer: t["da_pointer"].as_str().unwrap().into(),
+                    bond: t["bond"].as_u64().unwrap_or(0),
                     sig: hex::decode(t["sig_hex"].as_str().unwrap()).unwrap(),
                 }).collect();
             let bodies: HashMap<String, Vec<i64>> = b["bodies"].as_object().unwrap()
@@ -391,5 +393,28 @@ fn lottery_matches_reference() {
         // a forged proof (wrong signer) is never eligible
         assert!(!lottery::eligible("00".repeat(32).as_str(), &proof, prev, h, stake, total),
                 "eligibility must reject a proof that doesn't verify");
+    }
+}
+
+#[test]
+fn bond_lifecycle_matches_reference() {
+    use palimpsest_core::token::{address, TokenLedger, BOND_WINDOW};
+    for case in vectors()["bond"].as_array().unwrap() {
+        let miner = case["miner"].as_str().unwrap();
+        let addr = address(miner);
+        let mut led = TokenLedger::new();
+        led.apply_reward(1, &[miner.to_string()], miner, &[]);
+        assert_eq!(led.balance(&addr), case["bal_after_reward"].as_u64().unwrap());
+        let bond = case["bond"].as_u64().unwrap();
+        assert!(led.lock_bond("delta-tx-1", &addr, bond, 1), "bond must lock");
+        assert_eq!(led.root(), case["root_locked"].as_str().unwrap(), "root after lock");
+        assert_eq!(led.balance(&addr), case["bal_locked"].as_u64().unwrap());
+        led.resolve_expired_bonds(1 + BOND_WINDOW);
+        assert_eq!(led.root(), case["root_returned"].as_str().unwrap(), "root after return");
+        assert_eq!(led.balance(&addr), case["bal_returned"].as_u64().unwrap());
+        // insufficient balance is rejected (no state change)
+        let over = led.balance(&addr) + 1;
+        assert!(!led.lock_bond("delta-tx-2", &addr, over, 100),
+                "a bond the miner can't afford is rejected");
     }
 }

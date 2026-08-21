@@ -128,6 +128,8 @@ pub struct WireDeltaTx {
     pub shard_id: u64,
     pub delta_hash: String,
     pub da_pointer: String,
+    #[serde(default)]
+    pub bond: u64,
     pub sig: String, // hex
 }
 
@@ -139,6 +141,7 @@ impl WireDeltaTx {
             shard_id: self.shard_id,
             delta_hash: self.delta_hash.clone(),
             da_pointer: self.da_pointer.clone(),
+            bond: self.bond,
             sig: hex::decode(&self.sig).ok()?,
         })
     }
@@ -150,6 +153,7 @@ impl WireDeltaTx {
             shard_id: t.shard_id,
             delta_hash: t.delta_hash.clone(),
             da_pointer: t.da_pointer.clone(),
+            bond: t.bond,
             sig: hex::encode(&t.sig),
         }
     }

@@ -104,13 +104,13 @@ def main():
     v["ed25519"] = [{"seed_hex": key.sk.hex(), "pub_hex": key.pub,
                      "msg_hex": msg.hex(), "sig_hex": key.sign(msg).hex()}]
 
-    # --- BackpropTx: signing bytes / txid / signature -------------------------
+    # --- BackpropTx: signing bytes / txid / signature (with a bond) -----------
     tx = BackpropTx(miner=key.pub, base_height=7, shard_id=3,
                     delta_hash=delta_hash(d.tobytes()),
-                    da_pointer=f"da://{delta_hash(d.tobytes())}").signed(key)
+                    da_pointer=f"da://{delta_hash(d.tobytes())}", bond=5_000_000).signed(key)
     v["backprop_tx"] = [{
         "miner": tx.miner, "base_height": tx.base_height, "shard_id": tx.shard_id,
-        "delta_hash": tx.delta_hash, "da_pointer": tx.da_pointer,
+        "delta_hash": tx.delta_hash, "da_pointer": tx.da_pointer, "bond": tx.bond,
         "signing_bytes_hex": tx.signing_bytes().hex(),
         "txid": tx.txid(), "sig_hex": tx.sig.hex(), "verifies": tx.verify(),
     }]
@@ -217,6 +217,25 @@ def main():
         "data_root_of_all": data_root([sub, ch] + votes),
     }]
 
+    # --- delta admission bond: lock on inclusion, return at maturity ----------
+    from rig.token import BOND_WINDOW
+    ledb = TokenLedger()
+    ledb.apply_reward(1, [key.pub], key.pub, [])          # fund the miner
+    miner_addr = address(key.pub)
+    bal0 = ledb.balance(miner_addr)
+    bond_amt = bal0 // 2
+    assert ledb.lock_bond("delta-tx-1", miner_addr, bond_amt, 1)
+    root_locked, bal_locked = ledb.root(), ledb.balance(miner_addr)
+    ledb.resolve_expired_bonds(1 + BOND_WINDOW)           # matured -> returned
+    root_returned, bal_returned = ledb.root(), ledb.balance(miner_addr)
+    assert not ledb.lock_bond("delta-tx-2", miner_addr, bal_returned + 1, 100)
+    v["bond"] = [{
+        "miner": key.pub, "bond": bond_amt, "bal_after_reward": bal0,
+        "root_locked": root_locked, "bal_locked": bal_locked,
+        "resolve_height": 1 + BOND_WINDOW,
+        "root_returned": root_returned, "bal_returned": bal_returned,
+    }]
+
     # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----
     from rig import da as _da
     da_body = bytes((i * 7 + 3) % 256 for i in range(100))
@@ -300,7 +319,7 @@ def main():
             "header": dict(blk.header.__dict__),
             "txs": [{"miner": t.miner, "base_height": t.base_height,
                      "shard_id": t.shard_id, "delta_hash": t.delta_hash,
-                     "da_pointer": t.da_pointer, "sig_hex": t.sig.hex()}
+                     "da_pointer": t.da_pointer, "bond": t.bond, "sig_hex": t.sig.hex()}
                     for t in txs],
             "bodies": {p: b.tolist() for p, b in blk.bodies.items()},
             "transfers": [{"from_pub": t.from_pub, "to_addr": t.to_addr,

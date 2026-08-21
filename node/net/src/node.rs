@@ -975,6 +975,7 @@ pub async fn run(
                             shard_id: 0,
                             delta_hash: dh.clone(),
                             da_pointer: format!("da://{dh}"),
+                            bond: 0, // bootstrap: no bond; a bonded-miner policy is config
                             sig: vec![],
                         };
                         tx.sig = node.key.sign(&tx.signing_bytes());

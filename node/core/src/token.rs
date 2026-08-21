@@ -23,6 +23,8 @@ pub const GENESIS_DATA_WEIGHT: u64 = 1_000_000;
 /// Minimum affirmative juror votes to uphold a challenge — one juror must never
 /// be able to seize an owner's stake; below quorum the challenge is rejected.
 pub const CHALLENGE_QUORUM: usize = 3;
+/// Blocks a delta's admission bond stays locked (slashable) before it returns.
+pub const BOND_WINDOW: u64 = 20;
 
 /// Wallet address: sha256 of the raw pubkey bytes, first 20 bytes, hex.
 pub fn address(pub_hex: &str) -> String {
@@ -203,6 +205,7 @@ pub struct TokenLedger {
     pub nonces: BTreeMap<String, u64>,
     pub registry: BTreeMap<String, Value>,   // data_id -> entry object
     pub challenges: BTreeMap<String, Value>, // challenge_id -> challenge object
+    pub bonds: BTreeMap<String, Value>,      // delta_txid -> {miner, amount, expiry}
 }
 
 impl TokenLedger {
@@ -287,6 +290,35 @@ impl TokenLedger {
     }
 
     /// Settle every expired challenge (sorted id order) — FIRST step per block.
+    /// Return every stake bond whose lock window has closed (sorted txid order).
+    pub fn resolve_expired_bonds(&mut self, height: u64) {
+        let ids: Vec<String> = self.bonds.keys().cloned().collect();
+        for tid in ids {
+            let b = self.bonds[&tid].clone();
+            if b["expiry"].as_u64().unwrap() <= height {
+                let miner = b["miner"].as_str().unwrap().to_string();
+                self.credit(&miner, b["amount"].as_u64().unwrap());
+                self.bonds.remove(&tid);
+            }
+        }
+    }
+
+    /// Lock a delta's admission bond from the miner's balance (the Bitcoin analog
+    /// of paying to participate, but recoverable). False => block invalid. A zero
+    /// bond is a no-op so the fair-launch bootstrap still works.
+    pub fn lock_bond(&mut self, delta_txid: &str, miner_addr: &str, amount: u64, height: u64) -> bool {
+        if amount == 0 {
+            return true;
+        }
+        if self.balance(miner_addr) < amount {
+            return false;
+        }
+        *self.balances.get_mut(miner_addr).unwrap() -= amount;
+        self.bonds.insert(delta_txid.to_string(), json!({
+            "miner": miner_addr, "amount": amount, "expiry": height + BOND_WINDOW}));
+        true
+    }
+
     pub fn resolve_expired_challenges(&mut self, height: u64) {
         let ids: Vec<String> = self.challenges.keys().cloned().collect();
         for cid in ids {
@@ -406,6 +438,7 @@ impl TokenLedger {
     pub fn root(&self) -> String {
         let state = json!({
             "balances": self.balances,
+            "bonds": self.bonds,
             "challenges": self.challenges,
             "nonces": self.nonces,
             "registry": self.registry,
@@ -423,6 +456,7 @@ impl TokenLedger {
         serde_json::json!({
             "balances": self.balances, "nonces": self.nonces,
             "registry": self.registry, "challenges": self.challenges,
+            "bonds": self.bonds,
         })
     }
 
@@ -454,6 +488,15 @@ impl TokenLedger {
                 return None;
             }
             led.challenges.insert(k.clone(), c.clone());
+        }
+        // bonds are optional for backward compatibility with pre-rev-4 snapshots
+        if let Some(bonds) = v.get("bonds").and_then(|b| b.as_object()) {
+            for (k, b) in bonds {
+                if !(b["miner"].is_string() && b["amount"].is_u64() && b["expiry"].is_u64()) {
+                    return None;
+                }
+                led.bonds.insert(k.clone(), b.clone());
+            }
         }
         Some(led)
     }

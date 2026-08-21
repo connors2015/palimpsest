@@ -158,6 +158,7 @@ pub struct BackpropTx {
     pub shard_id: u64,
     pub delta_hash: String,
     pub da_pointer: String,
+    pub bond: u64, // rev 4: stake bond the miner locks to submit (grains)
     pub sig: Vec<u8>,
 }
 
@@ -171,6 +172,7 @@ impl BackpropTx {
             self.shard_id.to_string().as_bytes(),
             self.delta_hash.as_bytes(),
             self.da_pointer.as_bytes(),
+            self.bond.to_string().as_bytes(),
         ])
     }
 
