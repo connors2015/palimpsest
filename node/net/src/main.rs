@@ -241,7 +241,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_tokio()
         .with_tcp(libp2p::tcp::Config::default(),
                   libp2p::noise::Config::new, libp2p::yamux::Config::default)?
-        .with_quic()
+        .with_quic_config(|mut cfg| {
+            // libp2p-quic defaults (10s idle / 5s keepalive) are far too tight for
+            // a NAT'd peer on a lossy internet path: a couple of dropped keepalives
+            // and the connection idle-times-out, then redials — the ~30s connect/
+            // drop cycle we saw. Give it a generous idle window with frequent
+            // keepalives so NAT mappings stay warm and transient loss is survivable.
+            cfg.max_idle_timeout = 120_000;                 // ms
+            cfg.keep_alive_interval = Duration::from_secs(15);
+            cfg
+        })
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_behaviour(|key, relay_client| {
             node::behaviour(key, relay_client, relay_server)
