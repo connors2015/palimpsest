@@ -17,20 +17,25 @@ fn genesis_tree() -> BlockTree {
     BlockTree::new(vec![0i64; DIM], None)
 }
 
-/// A header whose roots are left blank — every guard under test fires before
-/// the state/root checks, so a valid root is unnecessary to prove rejection.
+/// A header whose roots are left blank but which carries a VALID proposer VRF
+/// proof + matching work, so validation passes the lottery gate and reaches the
+/// specific guard under test (height / n_txs / body length).
 fn header(tree: &BlockTree, height: u64, n_txs: u64) -> core::Header {
+    let key = core::Key::from_seed([9u8; 32]);
+    let prev = tree.genesis_hash.clone();
+    let proof = core::lottery::vrf_prove(&key, &prev, height);
     core::Header {
         height,
-        prev_hash: tree.genesis_hash.clone(),
+        prev_hash: prev,
         state_root: String::new(),
         txset_root: String::new(),
         n_txs,
-        work: 1,
-        proposer: "test".into(),
+        work: core::lottery::vrf_work(&proof),
+        proposer: key.pub_hex(),
         transfer_root: String::new(),
         ledger_root: String::new(),
         data_root: String::new(),
+        vrf_proof: hex::encode(&proof),
     }
 }
 
@@ -53,6 +58,24 @@ fn rejects_height_zero_nongenesis() {
     // height 0 on a non-genesis block would underflow `h.height - 1`.
     let e = tree.add_block(empty_block(header(&tree, 0, 0))).unwrap_err();
     assert!(e.0.contains("height must be parent height + 1"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_forged_work() {
+    let mut tree = genesis_tree();
+    let mut h = header(&tree, 1, 0); // valid VRF proof + correct vrf_work
+    h.work = 999_999; // ...but claim an inflated fork-choice weight
+    let e = tree.add_block(empty_block(h)).unwrap_err();
+    assert!(e.0.contains("VRF-derived weight"), "got: {}", e.0);
+}
+
+#[test]
+fn rejects_invalid_vrf_proof() {
+    let mut tree = genesis_tree();
+    let mut h = header(&tree, 1, 0);
+    h.vrf_proof = "00".repeat(64); // not a valid signature by the proposer
+    let e = tree.add_block(empty_block(h)).unwrap_err();
+    assert!(e.0.contains("invalid proposer VRF proof"), "got: {}", e.0);
 }
 
 #[test]

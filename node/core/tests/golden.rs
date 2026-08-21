@@ -119,6 +119,7 @@ fn header_from(case: &Value) -> core::Header {
         transfer_root: case["transfer_root"].as_str().unwrap_or("").into(),
         ledger_root: case["ledger_root"].as_str().unwrap_or("").into(),
         data_root: case["data_root"].as_str().unwrap_or("").into(),
+        vrf_proof: case["vrf_proof"].as_str().unwrap_or("").into(),
     }
 }
 

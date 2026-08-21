@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .chain import dequantize, quantize, state_root, trimmed_mean_int
-from .crypto import BackpropTx
+from .crypto import BackpropTx, verify
 from .token import (PROPOSER_LOOKBACK, TokenLedger, TransferTx,
                     canonical_account_txs, data_root as dta_root,
                     transfer_root as xfer_root)
@@ -46,13 +46,16 @@ class Header:
     state_root: str            # Merkle/hash of the weights AFTER this block
     txset_root: str
     n_txs: int
-    work: int                  # per-block work (score-weighted, see BlockTree)
+    work: int                  # fork-choice weight = vrf_work(vrf_proof), non-forgeable
     proposer: str              # pubkey of the block proposer
     # the TRANSFER LANE (protocol rev 2): the token ledger is consensus state
     transfer_root: str = ""    # order-independent commitment to the transfer set
     ledger_root: str = ""      # token-ledger root AFTER this block (rewards+transfers)
     # the DATA LANE (protocol rev 3): staked data registry + challenge market
     data_root: str = ""        # commitment to the block's data-lane tx set
+    # the PROPOSER LOTTERY (rev 4): the proposer's VRF proof over the height seed.
+    # header.work is derived from it (non-forgeable), replacing free-form work.
+    vrf_proof: str = ""        # hex of the deterministic-Ed25519 VRF signature
 
     def block_hash(self) -> str:
         return _sha(json.dumps(self.__dict__, sort_keys=True).encode())
@@ -128,6 +131,19 @@ def validate_block(block: Block, parent_w_int: np.ndarray, parent_height: int,
     #    a mismatch means the header misrepresents the block).
     if h.n_txs != len(block.txs):
         raise ValidationError("n_txs does not match tx count")
+    #    PROPOSER LOTTERY (rev 4): the VRF proof must be a valid signature by the
+    #    proposer over this height's seed, and header.work must be the
+    #    vrf_work derived from it — so work is NON-FORGEABLE (a peer can't claim
+    #    an arbitrary weight; it is bounded by its one VRF per height). Genesis is
+    #    constructed directly and exempt. (Stake-weighted eligibility gating —
+    #    lottery.eligible — is the fuller lottery, enforced at the testnet phase.)
+    from . import lottery
+    if h.proposer != "genesis":
+        proof = bytes.fromhex(h.vrf_proof) if h.vrf_proof else b""
+        if not verify(h.proposer, lottery.seed(h.prev_hash, h.height), proof):
+            raise ValidationError("invalid proposer VRF proof")
+        if h.work != lottery.vrf_work(proof):
+            raise ValidationError("header.work is not the VRF-derived weight")
     # 1. every tx is well-formed and correctly signed; its delta body must have
     #    the model dimension so aggregation cannot be made to panic/diverge by a
     #    short or long body (all bodies share `dim`, checked here before use).
@@ -276,24 +292,26 @@ class BlockTree:
 
 
 def build_block(tree: BlockTree, parent_hash: str, accepted: list, bodies: dict,
-                works: dict, proposer: str, transfers: list | None = None,
+                works: dict, proposer_key, transfers: list | None = None,
                 data_txs: list | None = None) -> Block:
-    """Assemble a valid block extending `parent_hash` from accepted txs, plus
-    the transfer lane (rev 2) and the data lane (rev 3): the header commits the
-    transfer set, the data-tx set, and the post-block ledger root.
-
-    `works[txid]` is the delta's score (its contribution to block weight)."""
+    """Assemble a valid block extending `parent_hash` from accepted txs, plus the
+    transfer lane (rev 2), the data lane (rev 3), and the proposer's VRF proof
+    (rev 4). `proposer_key` signs the VRF proof; header.work is the non-forgeable
+    vrf_work derived from it (`works` is retained for the future scored mempool)."""
+    from . import lottery
     parent_w = tree.state[parent_hash]
     transfers = list(transfers or [])
     data_txs = list(data_txs or [])
+    height = tree.blocks[parent_hash].header.height + 1
     deltas = [bodies[tx.da_pointer] for tx in accepted]
     w = parent_w + trimmed_mean_int(deltas) if deltas else parent_w.copy()
-    total_work = int(sum(max(0.0, works.get(tx.txid(), 0.0)) for tx in accepted) * 1000)
+    vrf_proof = lottery.vrf_prove(proposer_key, parent_hash, height)
     header = Header(
-        height=tree.blocks[parent_hash].header.height + 1,
+        height=height,
         prev_hash=parent_hash, state_root=state_root(w),
         txset_root=txset_root(accepted), n_txs=len(accepted),
-        work=total_work, proposer=proposer)
+        work=lottery.vrf_work(vrf_proof), proposer=proposer_key.pub,
+        vrf_proof=vrf_proof.hex())
     block = Block(header, accepted,
                   {t.da_pointer: bodies[t.da_pointer] for t in accepted},
                   transfers, data_txs)

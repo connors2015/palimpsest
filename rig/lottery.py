@@ -42,6 +42,16 @@ def vrf_output(proof: bytes) -> int:
     return int.from_bytes(hashlib.sha256(proof).digest(), "big")
 
 
+def vrf_work(proof: bytes) -> int:
+    """Fork-choice weight from the VRF output: leading zero bits + 1 (>= 1). A
+    luckier (smaller) output yields more work, so among the eligible proposers of
+    a height the luckiest wins — and work is NON-FORGEABLE (one VRF per proposer
+    per height), which is what makes header.work safe to trust."""
+    out = vrf_output(proof)
+    lz = 256 - out.bit_length() if out > 0 else 256
+    return lz + 1
+
+
 def threshold(stake: int, total_stake: int) -> int:
     """Eligible iff vrf_output < 2^256 · TARGET · stake/total_stake."""
     if total_stake <= 0 or stake <= 0:

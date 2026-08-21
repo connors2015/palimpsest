@@ -121,12 +121,13 @@ def main():
     h = Header(height=5, prev_hash="ab" * 32, state_root="cd" * 32,
                txset_root="ef" * 32, n_txs=2, work=1500, proposer=key.pub,
                transfer_root="12" * 32, ledger_root="34" * 32,
-               data_root="56" * 32)
+               data_root="56" * 32, vrf_proof="ab" * 32)
     v["header"] = [{
         "height": h.height, "prev_hash": h.prev_hash, "state_root": h.state_root,
         "txset_root": h.txset_root, "n_txs": h.n_txs, "work": h.work,
         "proposer": h.proposer, "transfer_root": h.transfer_root,
         "ledger_root": h.ledger_root, "data_root": h.data_root,
+        "vrf_proof": h.vrf_proof,
         "canonical_json": json.dumps(h.__dict__, sort_keys=True),
         "hash": h.block_hash(),
     }]
@@ -284,7 +285,7 @@ def main():
             tx = mk_tx(mk, hh, s, d)
             txs.append(tx); bodies[tx.da_pointer] = d
         blk = build_block(tree, parent, txs, bodies,
-                          {t.txid(): 1.0 for t in txs}, proposer_key.pub,
+                          {t.txid(): 1.0 for t in txs}, proposer_key,
                           transfers=list(transfers), data_txs=list(data_txs))
         tree.add_block(blk)
         blocks_out.append({
@@ -327,7 +328,8 @@ def main():
         "expected_ledger_root": tree.head_ledger().root(),
         "expected_supply": tree.head_ledger().supply(),
     }]
-    assert tree.head == b3, "test setup: heaviest chain must win"
+    # the head is now whichever chain fork choice (cumulative vrf_work) selects;
+    # it is recorded above as expected_head and the Rust node must reproduce it.
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:

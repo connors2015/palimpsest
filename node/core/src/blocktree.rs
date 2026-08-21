@@ -55,6 +55,20 @@ pub fn validate_block(
     if h.n_txs as usize != block.txs.len() {
         return Err(err("n_txs does not match tx count"));
     }
+    // PROPOSER LOTTERY (rev 4): the VRF proof must verify as a signature by the
+    // proposer over this height's seed, and header.work must be the vrf_work
+    // derived from it — so work is NON-FORGEABLE (a peer cannot claim an
+    // arbitrary fork-choice weight). Genesis is constructed directly and exempt.
+    if h.proposer != "genesis" {
+        let proof = hex::decode(&h.vrf_proof).unwrap_or_default();
+        let seed = crate::lottery::seed(&h.prev_hash, h.height);
+        if !crate::verify_sig(&h.proposer, &seed, &proof) {
+            return Err(err("invalid proposer VRF proof"));
+        }
+        if h.work != crate::lottery::vrf_work(&proof) {
+            return Err(err("header.work is not the VRF-derived weight"));
+        }
+    }
     // 1. every delta tx well-formed and signed; its DA body must have the model
     //    dimension (so aggregation can't be made to panic/diverge by a short or
     //    long body) and match its hash.
@@ -157,6 +171,7 @@ impl BlockTree {
             transfer_root: String::new(),
             ledger_root: String::new(),
             data_root: String::new(),
+            vrf_proof: String::new(),
         };
         let ghash = gh.block_hash();
         let mut t = BlockTree {

@@ -32,6 +32,23 @@ pub fn vrf_output(proof: &[u8]) -> [u8; 32] {
     Sha256::digest(proof).into()
 }
 
+/// Fork-choice weight: leading zero bits of the VRF output + 1 (>= 1). Luckier
+/// (smaller) output => more work, so the luckiest eligible proposer wins — and
+/// work is non-forgeable (one VRF per proposer per height).
+pub fn vrf_work(proof: &[u8]) -> u64 {
+    let out = vrf_output(proof);
+    let mut lz = 0u64;
+    for &b in out.iter() {
+        if b == 0 {
+            lz += 8;
+        } else {
+            lz += b.leading_zeros() as u64;
+            break;
+        }
+    }
+    lz + 1
+}
+
 /// Eligible iff the VRF proof verifies for `pub_hex` at this height AND its
 /// output falls under the stake-weighted threshold
 /// (output < 2^256 · TARGET · stake/total_stake).

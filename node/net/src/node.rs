@@ -429,6 +429,9 @@ impl Node {
             }).collect();
         let core_data: Vec<AccountTx> = data_txs.iter()
             .filter_map(account_tx_from_json).collect();
+        // proposer lottery: sign the VRF proof over this height's seed; work is
+        // the non-forgeable weight derived from it.
+        let vrf_proof = core::lottery::vrf_prove(&self.key, &head, hh + 1);
         let header = core::Header {
             height: hh + 1,
             prev_hash: head.clone(),
@@ -436,11 +439,12 @@ impl Node {
             txset_root: core::txset_root(
                 &chosen.iter().map(|t| t.txid()).collect::<Vec<_>>()),
             n_txs: chosen.len() as u64,
-            work: chosen.len() as u64 * 1000,
+            work: core::lottery::vrf_work(&vrf_proof),
             proposer: self.key.pub_hex(),
             transfer_root: palimpsest_core::token::transfer_root(&core_transfers),
             ledger_root: scratch.root(),
             data_root: palimpsest_core::token::data_root(&core_data),
+            vrf_proof: hex::encode(&vrf_proof),
         };
         let stored = StoredBlock {
             header: WireHeader::from_core(&header),

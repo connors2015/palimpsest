@@ -83,6 +83,8 @@ pub struct WireHeader {
     pub transfer_root: String,
     pub ledger_root: String,
     pub data_root: String,
+    #[serde(default)]
+    pub vrf_proof: String,
 }
 
 impl WireHeader {
@@ -98,6 +100,7 @@ impl WireHeader {
             transfer_root: self.transfer_root.clone(),
             ledger_root: self.ledger_root.clone(),
             data_root: self.data_root.clone(),
+            vrf_proof: self.vrf_proof.clone(),
         }
     }
 
@@ -113,6 +116,7 @@ impl WireHeader {
             transfer_root: h.transfer_root.clone(),
             ledger_root: h.ledger_root.clone(),
             data_root: h.data_root.clone(),
+            vrf_proof: h.vrf_proof.clone(),
         }
     }
 }
