@@ -94,8 +94,32 @@ def apply_ledger(parent_ledger: TokenLedger, block: Block,
     h = block.header.height
     led.resolve_expired_challenges(h)
     led.resolve_expired_bonds(h)        # return matured delta bonds first
+    # PROVENANCE (rev 5): every delta must name data that is staked + active in the
+    # registry (the on-chain availability proxy). A delta naming no active corpus
+    # is rejected — the model is only ever trained on auditable data. The genesis
+    # data entry (data_hash "genesis") is always active, so bootstrap deltas can
+    # name it until real corpora are staked.
+    active_hashes = {e["data_hash"] for e in led.registry.values()
+                     if e["status"] == "active"}
+    for tx in block.txs:
+        refs = tx.canonical_refs()
+        if not any(r in active_hashes for r in refs):
+            raise ValidationError(
+                f"delta {tx.txid()[:8]} names no staked/available data "
+                f"(provenance required)")
+    # data-share credits: split across the corpora THIS block's deltas named,
+    # each weighted by its registry weight (interim; loss-score replaces this
+    # when delta scoring is enforced). Named more times / higher stake ⇒ more.
+    data_credits: dict[str, int] = {}
+    hash_weight = {e["data_hash"]: e["weight"] for e in led.registry.values()
+                   if e["status"] == "active" and e["weight"] > 0}
+    for tx in block.txs:
+        for r in tx.canonical_refs():
+            if r in hash_weight:
+                data_credits[r] = data_credits.get(r, 0) + hash_weight[r]
     led.apply_reward(h, miner_pubs=[tx.miner for tx in block.txs],
                      proposer_pub=block.header.proposer,
+                     data_credits=data_credits,
                      data_addrs=[data_contributor] if data_contributor else [])
     # lock each included delta's admission bond from its miner's balance (after
     # the reward, so this block's reward can fund this block's bond). A miner who

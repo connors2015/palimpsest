@@ -90,6 +90,9 @@ fn backprop_tx_matches_reference() {
             delta_hash: case["delta_hash"].as_str().unwrap().into(),
             da_pointer: case["da_pointer"].as_str().unwrap().into(),
             bond: case["bond"].as_u64().unwrap_or(0),
+            data_refs: case.get("data_refs").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
             sig: hex::decode(case["sig_hex"].as_str().unwrap()).unwrap(),
         };
         assert_eq!(hex::encode(tx.signing_bytes()),
@@ -168,7 +171,7 @@ fn ledger_matches_reference() {
             .iter().map(|x| x.as_str().unwrap().to_string()).collect();
         let mut led = TokenLedger::new();
         led.apply_reward(case["height"].as_u64().unwrap(), &miners,
-                         case["proposer"].as_str().unwrap(), &data);
+                         case["proposer"].as_str().unwrap(), &data, &Default::default());
         assert_eq!(led.root(), case["root_after_reward"].as_str().unwrap(),
                    "reward split / ledger-root serialization mismatch");
         let tx = transfer_from(&case["transfer"]);
@@ -183,6 +186,36 @@ fn ledger_matches_reference() {
         for (addr, bal) in case["balances"].as_object().unwrap() {
             assert_eq!(led.balance(addr), bal.as_u64().unwrap());
         }
+    }
+}
+
+#[test]
+fn data_provenance_matches_reference() {
+    use palimpsest_core::token::TokenLedger;
+    use std::collections::BTreeMap;
+    for case in vectors()["data_provenance"].as_array().unwrap() {
+        let mut led = TokenLedger::new();
+        let corpora = case["corpora"].as_object().unwrap();
+        for (h, owner) in corpora {
+            led.registry.insert(h.clone(), serde_json::json!({
+                "owner": owner.as_str().unwrap(), "data_hash": h,
+                "size": 0, "media_type": "text", "stake": 0,
+                "weight": 1, "status": "active"}));
+        }
+        let credits: BTreeMap<String, u64> = case["data_credits"].as_object().unwrap()
+            .iter().map(|(k, v)| (k.clone(), v.as_u64().unwrap())).collect();
+        let miner = case["miner"].as_str().unwrap();
+        led.apply_reward(case["height"].as_u64().unwrap(), &[miner.to_string()],
+                         miner, &[], &credits);
+        // only the NAMED corpus (A) is paid; the unnamed active corpus (B) earns 0
+        assert_eq!(led.balance(case["owner_a"].as_str().unwrap()),
+                   case["balance_a"].as_u64().unwrap(), "named corpus owner payout");
+        assert_eq!(led.balance(case["owner_b"].as_str().unwrap()),
+                   case["balance_b"].as_u64().unwrap(), "unnamed corpus must earn 0");
+        assert_eq!(led.balance(&palimpsest_core::token::address(miner)),
+                   case["miner_after"].as_u64().unwrap(), "miner share");
+        assert_eq!(led.root(), case["root"].as_str().unwrap(),
+                   "provenance-payout ledger root mismatch");
     }
 }
 
@@ -229,11 +262,11 @@ fn data_lane_matches_reference() {
         assert_eq!(sub.txid(), case["submit"]["txid"].as_str().unwrap());
         // fund the submitter exactly as the reference did
         let owner = case["submit"]["owner_pub"].as_str().unwrap().to_string();
-        led.apply_reward(1, &[owner.clone()], &owner, &[]);
+        led.apply_reward(1, &[owner.clone()], &owner, &[], &Default::default());
         assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
         assert_eq!(led.root(), case["root_after_submit"].as_str().unwrap());
         let challenger = case["challenge"]["challenger_pub"].as_str().unwrap().to_string();
-        led.apply_reward(2, &[challenger.clone()], &challenger, &[]);
+        led.apply_reward(2, &[challenger.clone()], &challenger, &[], &Default::default());
         let ch = data_tx_from("challenge", &case["challenge"]);
         assert!(led.apply_data_tx(&ch, 2, &HashSet::new()));
         // CHALLENGE_QUORUM disinterested jurors vote to uphold
@@ -276,6 +309,9 @@ fn full_chain_replay_matches_reference() {
                     delta_hash: t["delta_hash"].as_str().unwrap().into(),
                     da_pointer: t["da_pointer"].as_str().unwrap().into(),
                     bond: t["bond"].as_u64().unwrap_or(0),
+                    data_refs: t.get("data_refs").and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
                     sig: hex::decode(t["sig_hex"].as_str().unwrap()).unwrap(),
                 }).collect();
             let bodies: HashMap<String, Vec<i64>> = b["bodies"].as_object().unwrap()
@@ -403,7 +439,7 @@ fn bond_lifecycle_matches_reference() {
         let miner = case["miner"].as_str().unwrap();
         let addr = address(miner);
         let mut led = TokenLedger::new();
-        led.apply_reward(1, &[miner.to_string()], miner, &[]);
+        led.apply_reward(1, &[miner.to_string()], miner, &[], &Default::default());
         assert_eq!(led.balance(&addr), case["bal_after_reward"].as_u64().unwrap());
         let bond = case["bond"].as_u64().unwrap();
         assert!(led.lock_bond("delta-tx-1", &addr, bond, 1), "bond must lock");
@@ -438,7 +474,7 @@ fn inference_receipt_matches_reference() {
                    case["signing_bytes_hex"].as_str().unwrap());
         assert_eq!(rcpt.txid(), case["txid"].as_str().unwrap());
         let mut led = TokenLedger::new();
-        led.apply_reward(1, &[payer.to_string()], payer, &[]);
+        led.apply_reward(1, &[payer.to_string()], payer, &[], &Default::default());
         assert!(led.apply_data_tx(&rcpt, 5, &HashSet::new()), "receipt must apply");
         assert_eq!(led.balance(&address(payer)), case["payer_after"].as_u64().unwrap());
         assert_eq!(led.balance(case["server_addr"].as_str().unwrap()),

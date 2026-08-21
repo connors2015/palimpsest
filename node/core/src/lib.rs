@@ -159,21 +159,42 @@ pub struct BackpropTx {
     pub delta_hash: String,
     pub da_pointer: String,
     pub bond: u64, // rev 4: stake bond the miner locks to submit (grains)
+    // rev 5: PROVENANCE — content addresses of the data this gradient trained on.
+    // Empty is rejected by block validation; the share pays these corpora's owners.
+    pub data_refs: Vec<String>,
     pub sig: Vec<u8>,
 }
 
 impl BackpropTx {
+    /// Sorted, de-duplicated provenance set — the canonical data_refs.
+    pub fn canonical_refs(&self) -> Vec<String> {
+        let mut r = self.data_refs.clone();
+        r.sort();
+        r.dedup();
+        r
+    }
+
     /// Must match the Python reference byte-for-byte (length-prefixed framing).
     pub fn signing_bytes(&self) -> Vec<u8> {
-        frame(&[
+        let refs = self.canonical_refs();
+        let base = self.base_height.to_string();
+        let shard = self.shard_id.to_string();
+        let bond = self.bond.to_string();
+        let count = refs.len().to_string();
+        let mut parts: Vec<&[u8]> = vec![
             b"backprop",
             self.miner.as_bytes(),
-            self.base_height.to_string().as_bytes(),
-            self.shard_id.to_string().as_bytes(),
+            base.as_bytes(),
+            shard.as_bytes(),
             self.delta_hash.as_bytes(),
             self.da_pointer.as_bytes(),
-            self.bond.to_string().as_bytes(),
-        ])
+            bond.as_bytes(),
+            count.as_bytes(),
+        ];
+        for r in &refs {
+            parts.push(r.as_bytes());
+        }
+        frame(&parts)
     }
 
     pub fn txid(&self) -> String {

@@ -126,7 +126,32 @@ pub fn validate_block(
     led.resolve_expired_bonds(h.height); // return matured delta bonds first
     let miner_pubs: Vec<String> = block.txs.iter().map(|t| t.miner.clone()).collect();
     let data_addrs: Vec<String> = data_contributor.map(|d| vec![d.to_string()]).unwrap_or_default();
-    led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs);
+    // rev 5 PROVENANCE: every delta must name data that is staked + active in the
+    // registry; the data share is credited to those named corpora (∝ registry
+    // weight; loss-score replaces this when delta scoring lands). Mirrors
+    // rig.blockchain.apply_ledger.
+    let active_hashes: std::collections::BTreeSet<String> = led.registry.values()
+        .filter(|e| e["status"] == "active")
+        .filter_map(|e| e["data_hash"].as_str().map(|s| s.to_string()))
+        .collect();
+    for tx in &block.txs {
+        if !tx.canonical_refs().iter().any(|r| active_hashes.contains(r)) {
+            return Err(err("delta names no staked/available data (provenance required)"));
+        }
+    }
+    let hash_weight: std::collections::BTreeMap<String, u64> = led.registry.values()
+        .filter(|e| e["status"] == "active" && e["weight"].as_u64().unwrap_or(0) > 0)
+        .filter_map(|e| Some((e["data_hash"].as_str()?.to_string(), e["weight"].as_u64()?)))
+        .collect();
+    let mut data_credits: std::collections::BTreeMap<String, u64> = Default::default();
+    for tx in &block.txs {
+        for r in tx.canonical_refs() {
+            if let Some(w) = hash_weight.get(&r) {
+                *data_credits.entry(r).or_insert(0) += *w;
+            }
+        }
+    }
+    led.apply_reward(h.height, &miner_pubs, &h.proposer, &data_addrs, &data_credits);
     // lock each included delta's admission bond (after the reward, so this
     // block's reward can fund its bond); an unaffordable bond invalidates the block
     for tx in &block.txs {

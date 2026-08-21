@@ -107,10 +107,12 @@ def main():
     # --- BackpropTx: signing bytes / txid / signature (with a bond) -----------
     tx = BackpropTx(miner=key.pub, base_height=7, shard_id=3,
                     delta_hash=delta_hash(d.tobytes()),
-                    da_pointer=f"da://{delta_hash(d.tobytes())}", bond=5_000_000).signed(key)
+                    da_pointer=f"da://{delta_hash(d.tobytes())}", bond=5_000_000,
+                    data_refs=["bb" * 32, "aa" * 32, "aa" * 32]).signed(key)  # rev 5: unsorted+dup
     v["backprop_tx"] = [{
         "miner": tx.miner, "base_height": tx.base_height, "shard_id": tx.shard_id,
         "delta_hash": tx.delta_hash, "da_pointer": tx.da_pointer, "bond": tx.bond,
+        "data_refs": tx.canonical_refs(),
         "signing_bytes_hex": tx.signing_bytes().hex(),
         "txid": tx.txid(), "sig_hex": tx.sig.hex(), "verifies": tx.verify(),
     }]
@@ -255,6 +257,29 @@ def main():
         "root_after": ledr.root(),
     }]
 
+    # --- data provenance payout (rev 5): the data share pays the owners of the
+    #     corpora a block NAMED, ∝ credit weight; an unnamed active corpus earns 0.
+    owner_a = Key.generate(b"prov-owner-a-0000000000000000000")
+    owner_b = Key.generate(b"prov-owner-b-0000000000000000000")
+    miner_p = Key.generate(b"prov-miner-000000000000000000000")
+    ledp = TokenLedger()
+    for h_, ow in (("corpusA", owner_a), ("corpusB", owner_b)):
+        ledp.registry[h_] = {"owner": address(ow.pub), "data_hash": h_, "size": 0,
+                             "media_type": "text", "stake": 0, "weight": 1,
+                             "status": "active"}
+    prov_credits = {"corpusA": 1}                    # only corpus A was named this block
+    ledp.apply_reward(5, [miner_p.pub], miner_p.pub, data_credits=prov_credits)
+    v["data_provenance"] = [{
+        "height": 5, "miner": miner_p.pub,
+        "corpora": {"corpusA": address(owner_a.pub), "corpusB": address(owner_b.pub)},
+        "data_credits": prov_credits,
+        "owner_a": address(owner_a.pub), "owner_b": address(owner_b.pub),
+        "balance_a": ledp.balance(address(owner_a.pub)),
+        "balance_b": ledp.balance(address(owner_b.pub)),
+        "miner_after": ledp.balance(address(miner_p.pub)),
+        "root": ledp.root(),
+    }]
+
     # --- DA: erasure coding + Merkle commitment (the Rust port must match) ----
     from rig import da as _da
     da_body = bytes((i * 7 + 3) % 256 for i in range(100))
@@ -317,8 +342,10 @@ def main():
 
     def mk_tx(miner_key, height, shard, delta):
         dh = delta_hash(delta.tobytes())
+        # rev 5: name the always-active genesis corpus so the delta is provenanced
         return BackpropTx(miner=miner_key.pub, base_height=height, shard_id=shard,
-                          delta_hash=dh, da_pointer=f"da://{dh}").signed(miner_key)
+                          delta_hash=dh, da_pointer=f"da://{dh}",
+                          data_refs=["genesis"]).signed(miner_key)
 
     blocks_out = []
 
@@ -338,7 +365,8 @@ def main():
             "header": dict(blk.header.__dict__),
             "txs": [{"miner": t.miner, "base_height": t.base_height,
                      "shard_id": t.shard_id, "delta_hash": t.delta_hash,
-                     "da_pointer": t.da_pointer, "bond": t.bond, "sig_hex": t.sig.hex()}
+                     "da_pointer": t.da_pointer, "bond": t.bond,
+                     "data_refs": t.canonical_refs(), "sig_hex": t.sig.hex()}
                     for t in txs],
             "bodies": {p: b.tolist() for p, b in blk.bodies.items()},
             "transfers": [{"from_pub": t.from_pub, "to_addr": t.to_addr,

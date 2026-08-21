@@ -80,12 +80,27 @@ class BackpropTx:
     delta_hash: str       # sha256 of the delta body bytes
     da_pointer: str       # where the body can be fetched (DA layer key)
     bond: int = 0         # rev 4: stake bond the miner locks to submit (grains)
+    # rev 5: PROVENANCE — the content addresses (data_hash) of the data this
+    # gradient was trained on. A gradient names its data so the data share can
+    # be paid to the data's owners (not a single configured address) and the
+    # link is auditable: fetch the named data, recompute the gradient, compare.
+    # Empty = no provenance claim → the delta may still be accepted on its
+    # loss-score merit, but earns no data share. Canonicalized (sorted, unique).
+    data_refs: list = field(default_factory=list)
     sig: bytes = b""
 
+    def canonical_refs(self) -> list:
+        """Sorted, de-duplicated data_hash list — the canonical provenance set."""
+        return sorted(set(self.data_refs))
+
     def signing_bytes(self) -> bytes:
+        refs = self.canonical_refs()
         return frame(b"backprop", self.miner.encode(), str(self.base_height).encode(),
                      str(self.shard_id).encode(), self.delta_hash.encode(),
-                     self.da_pointer.encode(), str(self.bond).encode())
+                     self.da_pointer.encode(), str(self.bond).encode(),
+                     # count-prefixed so zero refs is unambiguous vs. the fields
+                     # above, then each ref as its own length-framed field.
+                     str(len(refs)).encode(), *[r.encode() for r in refs])
 
     def txid(self) -> str:
         return hashlib.sha256(self.signing_bytes()).hexdigest()

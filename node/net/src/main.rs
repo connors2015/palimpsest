@@ -71,6 +71,10 @@ struct Args {
     seconds: f64,            // 0 = run forever
     #[arg(long, default_value = "")]
     data_contributor: String,
+    #[arg(long, default_value = "")]
+    data_refs: String,       // rev 5: comma-separated data_hashes of the staked
+                             // corpora this miner trains on; named on every delta
+                             // for provenance (empty deltas are rejected)
     #[arg(long, default_value_t = false)]
     relay_server: bool,      // seeds: relay NAT'd peers (circuit relay v2)
     #[arg(long, default_value = "")]
@@ -319,6 +323,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rotate,
             seconds: args.seconds,
             peers: args.peers.clone(),
+            data_refs: args.data_refs.split(',')
+                .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         },
         topic,
         bridge_tx: bridge_cmd_tx,

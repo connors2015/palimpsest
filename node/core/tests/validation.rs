@@ -101,6 +101,7 @@ fn rejects_wrong_length_delta_body() {
         delta_hash: dh.clone(),
         da_pointer: format!("da://{dh}"),
         bond: 0,
+        data_refs: vec![],
         sig: vec![],
     };
     tx.sig = key.sign(&tx.signing_bytes());
@@ -145,14 +146,14 @@ fn open_challenge() -> (TokenLedger, core::Key, core::Key, Vec<core::Key>, Strin
     let jurors: Vec<core::Key> = (10u8..13).map(|i| core::Key::from_seed([i; 32])).collect();
     let mut led = TokenLedger::new();
     // fund owner + challenger via block rewards
-    led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[]);
+    led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[], &Default::default());
     let sub = signed(AccountTx::DataSubmit(DataSubmitTx {
         owner_pub: owner.pub_hex(), data_hash: "aa".repeat(32), size_bytes: 8,
         media_type: "text".into(), stake: 1_000_000, nonce: 0, sig: vec![],
     }), &owner);
     assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
     let data_id = sub.txid();
-    led.apply_reward(2, &[challenger.pub_hex()], &challenger.pub_hex(), &[]);
+    led.apply_reward(2, &[challenger.pub_hex()], &challenger.pub_hex(), &[], &Default::default());
     let ch = signed(AccountTx::DataChallenge(DataChallengeTx {
         challenger_pub: challenger.pub_hex(), data_id: data_id.clone(), stake: 500_000,
         reason: "validity".into(), nonce: 0, sig: vec![],
@@ -230,7 +231,7 @@ fn rejects_replayed_and_overspending_transfers() {
     let sender = core::Key::from_seed([3u8; 32]);
     let recipient = address(&core::Key::from_seed([4u8; 32]).pub_hex());
     let mut led = TokenLedger::new();
-    led.apply_reward(1, &[sender.pub_hex()], &sender.pub_hex(), &[]);
+    led.apply_reward(1, &[sender.pub_hex()], &sender.pub_hex(), &[], &Default::default());
     let bal = led.balance(&address(&sender.pub_hex()));
     assert!(bal > 0);
 
@@ -255,7 +256,7 @@ fn rejects_replayed_and_overspending_transfers() {
 fn rejects_bad_data_lane_txs() {
     let owner = core::Key::from_seed([1u8; 32]);
     let mut led = TokenLedger::new();
-    led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[]);
+    led.apply_reward(1, &[owner.pub_hex()], &owner.pub_hex(), &[], &Default::default());
 
     // zero-stake submission is rejected
     let zero = signed(AccountTx::DataSubmit(DataSubmitTx {
@@ -272,7 +273,7 @@ fn rejects_bad_data_lane_txs() {
     assert!(led.apply_data_tx(&sub, 1, &HashSet::new()));
     let data_id = sub.txid();
     let challenger = core::Key::from_seed([2u8; 32]);
-    led.apply_reward(2, &[challenger.pub_hex()], &challenger.pub_hex(), &[]);
+    led.apply_reward(2, &[challenger.pub_hex()], &challenger.pub_hex(), &[], &Default::default());
     let ch = signed(AccountTx::DataChallenge(DataChallengeTx {
         challenger_pub: challenger.pub_hex(), data_id: data_id.clone(), stake: 100_000,
         reason: "validity".into(), nonce: 0, sig: vec![],

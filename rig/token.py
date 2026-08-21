@@ -255,16 +255,21 @@ class TokenLedger:
 
     # ---- block reward ----------------------------------------------------
     def apply_reward(self, height: int, miner_pubs: list[str],
-                     proposer_pub: str, data_addrs: list[str] = ()):
+                     proposer_pub: str, data_addrs: list[str] = (),
+                     *, data_credits: dict[str, int] = None):
         """Mint the block's emission and split it. Integer division truncates;
         the remainder (dust) is deliberately burned — supply never exceeds the
         schedule. Deterministic given identical inputs on every node.
 
-        The data share goes to the REGISTRY: split across active entries in
-        proportion to weight (v1: stake-weighted + the genesis entry's published
-        weight; TRAK attribution replaces weights at the attribution milestone).
-        `data_addrs` remains as a legacy fallback used only when the registry is
-        empty (pre-rev-3 chains)."""
+        PROVENANCE PAYOUT (rev 5): the data share goes to the owners of the data
+        THIS block's deltas actually named, weighted by `data_credits` — a
+        {data_hash: weight} map the caller derives from the block's deltas (each
+        named corpus's contribution weight; interim weight = registry stake-weight
+        until loss-scoring supplies the real per-delta score). Only entries that
+        are `active` in the registry and carry positive weight are paid; an
+        unbacked hash pays nobody. This replaces the rev-3 behaviour of paying
+        every registered entry every block. `data_addrs` is a legacy fallback
+        (pre-rev-3 chains with no provenance)."""
         total = emission(height)
         if total == 0:
             return
@@ -277,12 +282,17 @@ class TokenLedger:
                 self._credit(address(pub), each)
         if proposer_pub and proposer_pub != "genesis":
             self._credit(address(proposer_pub), proposer_cut)
-        active = [(did, e) for did, e in sorted(self.registry.items())
-                  if e["status"] == "active" and e["weight"] > 0]
-        if active:
-            wsum = sum(e["weight"] for _, e in active)
-            for _, e in active:                            # ∝ weight, dust burned
-                self._credit(e["owner"], data_pool * e["weight"] // wsum)
+        # data share → owners named by this block's deltas, ∝ contribution weight.
+        # Resolve each named data_hash to its active registry entry (the on-chain
+        # availability proxy); unknown/inactive hashes are dropped.
+        hash_to_owner = {e["data_hash"]: e["owner"]
+                         for e in self.registry.values() if e["status"] == "active"}
+        paid = {h: w for h, w in (data_credits or {}).items()
+                if w > 0 and h in hash_to_owner}
+        if paid:
+            wsum = sum(paid.values())
+            for h in sorted(paid):                         # ∝ weight, dust burned
+                self._credit(hash_to_owner[h], data_pool * paid[h] // wsum)
         elif data_addrs:                                   # legacy fallback
             each = data_pool // len(data_addrs)
             for addr in sorted(data_addrs):

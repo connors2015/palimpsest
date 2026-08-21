@@ -145,6 +145,8 @@ pub struct WireDeltaTx {
     pub da_pointer: String,
     #[serde(default)]
     pub bond: u64,
+    #[serde(default)]
+    pub data_refs: Vec<String>,   // rev 5: provenance — corpora this gradient trained on
     pub sig: String, // hex
 }
 
@@ -157,6 +159,7 @@ impl WireDeltaTx {
             delta_hash: self.delta_hash.clone(),
             da_pointer: self.da_pointer.clone(),
             bond: self.bond,
+            data_refs: self.data_refs.clone(),
             sig: hex::decode(&self.sig).ok()?,
         })
     }
@@ -169,6 +172,7 @@ impl WireDeltaTx {
             delta_hash: t.delta_hash.clone(),
             da_pointer: t.da_pointer.clone(),
             bond: t.bond,
+            data_refs: t.data_refs.clone(),
             sig: hex::encode(&t.sig),
         }
     }

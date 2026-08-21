@@ -268,7 +268,8 @@ impl TokenLedger {
     /// deterministic (identical on every node) and is the reason `supply()` runs a
     /// hair under the nominal curve — a known, documented property, not a leak.
     pub fn apply_reward(&mut self, height: u64, miner_pubs: &[String],
-                        proposer_pub: &str, legacy_data_addrs: &[String]) {
+                        proposer_pub: &str, legacy_data_addrs: &[String],
+                        data_credits: &BTreeMap<String, u64>) {
         let total = emission(height);
         if total == 0 {
             return;
@@ -289,19 +290,27 @@ impl TokenLedger {
             let a = address(proposer_pub);
             self.credit(&a, proposer_cut);
         }
-        let active: Vec<(String, u64)> = self.registry.iter()
-            .filter(|(_, e)| e["status"] == "active"
-                    && e["weight"].as_u64().unwrap_or(0) > 0)
-            .map(|(_, e)| (e["owner"].as_str().unwrap().to_string(),
-                           e["weight"].as_u64().unwrap()))
+        // rev 5 PROVENANCE: the data share pays the owners of the corpora THIS
+        // block's deltas named, ∝ their credit weight — resolved to active
+        // registry entries (the on-chain availability proxy). An unbacked hash
+        // pays nobody. Mirrors rig.token.apply_reward.
+        let hash_to_owner: BTreeMap<String, String> = self.registry.values()
+            .filter(|e| e["status"] == "active")
+            .filter_map(|e| Some((e["data_hash"].as_str()?.to_string(),
+                                  e["owner"].as_str()?.to_string())))
             .collect();
-        if !active.is_empty() {
-            let wsum: u128 = active.iter().map(|(_, w)| *w as u128).sum();
-            for (owner, w) in active {
+        let mut paid: Vec<(&String, u64)> = data_credits.iter()
+            .filter(|(h, w)| **w > 0 && hash_to_owner.contains_key(*h))
+            .map(|(h, w)| (h, *w))
+            .collect();
+        if !paid.is_empty() {
+            paid.sort();                                   // by data_hash, canonical
+            let wsum: u128 = paid.iter().map(|(_, w)| *w as u128).sum();
+            for (h, w) in paid {
                 // u128 intermediate: pool×weight can exceed u64 (Python bigints
                 // don't overflow; the floor-divided result always fits u64)
                 let share = (data_pool as u128 * w as u128 / wsum) as u64;
-                self.credit(&owner, share);
+                self.credit(&hash_to_owner[h], share);
             }
         } else if !legacy_data_addrs.is_empty() {
             let each = data_pool / legacy_data_addrs.len() as u64;

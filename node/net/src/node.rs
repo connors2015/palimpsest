@@ -281,6 +281,7 @@ pub struct NodeConfig {
     pub rotate: Option<(u64, u64)>, // (n, id): deterministic devnet rotation
     pub seconds: f64,               // 0 = run forever
     pub peers: String,              // configured peers — re-dialed when lost
+    pub data_refs: Vec<String>,     // rev 5: staked corpora this miner names on its deltas
 }
 
 pub struct Node {
@@ -480,7 +481,7 @@ impl Node {
         let mut scratch = self.tree.ledger[&head].clone();
         scratch.resolve_expired_challenges(hh + 1);
         let miner_pubs: Vec<String> = chosen.iter().map(|t| t.miner.clone()).collect();
-        scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &[]);
+        scratch.apply_reward(hh + 1, &miner_pubs, &self.key.pub_hex(), &[], &Default::default());
         let jurors = self.tree.recent_proposers(&head);
         let mut transfers = Vec::new();
         let mut data_txs = Vec::new();
@@ -1033,6 +1034,9 @@ pub async fn run(
                             delta_hash: dh.clone(),
                             da_pointer: format!("da://{dh}"),
                             bond: 0, // bootstrap: no bond; a bonded-miner policy is config
+                            // rev 5: name the staked corpora this miner trains on so
+                            // the delta is provenanced and the data share pays their owners
+                            data_refs: node.cfg.data_refs.clone(),
                             sig: vec![],
                         };
                         tx.sig = node.key.sign(&tx.signing_bytes());
