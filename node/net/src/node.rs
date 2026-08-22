@@ -1421,8 +1421,28 @@ pub async fn run(
                             // a fresh node bootstraps the genesis from us — the
                             // shared trust anchor, self-verified by the requester
                             // against the published genesis id.
+                            // Serving the genesis is only possible when it fits
+                            // the response cap: JSON-encoded i64s are ~6-10
+                            // bytes each, so a ~650MB production genesis blows
+                            // past SYNC_RESP_MAX and the requester would just
+                            // time out. Refuse loudly instead of blackholing —
+                            // the requester's error tells them to generate it
+                            // locally (it's deterministic).
                             let genesis = if request.want_genesis {
-                                node.tree.state.get(&node.tree.genesis_hash).cloned()
+                                let g = node.tree.state.get(&node.tree.genesis_hash);
+                                match g {
+                                    Some(w) if w.len() * 8 <= SYNC_BYTE_BUDGET =>
+                                        Some(w.clone()),
+                                    Some(w) => {
+                                        warn!(params = w.len(),
+                                              "peer asked for the genesis but it is \
+                                               too large to serve over sync; they \
+                                               must generate it locally from the \
+                                               published seed");
+                                        None
+                                    }
+                                    None => None,
+                                }
                             } else {
                                 None
                             };

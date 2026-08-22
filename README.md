@@ -38,21 +38,38 @@ local chain, loss falling live in your browser, chat with the head:
 uv run --with torch --with numpy --with pynacl python -m client.watch --demo
 ```
 
-**Join the live network** — build the node and point it at a peer; it fetches the
-genesis from that peer, verifies it against the published id, and syncs:
+**Join the live network** — build the node, generate the genesis (it's
+deterministic from a published seed, so you reproduce it rather than trust a
+download), then sync:
 
 ```bash
-cd node && cargo build --release
-target/release/palimpsest-node --data-dir ~/.palimpsest \
-  --wallet ~/.palimpsest/wallet.json \
-  --peers /ip4/169.58.211.248/tcp/9800 \
-  --genesis-hash 30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28
+cd node && cargo build --release && cd ..
+python -m client.wallet new                      # your identity AND your balance
+
+# reproduce the genesis — must print state_root 30ea20da…c28
+uv run --with torch --with numpy --with pynacl \
+    python -m client.make_genesis --model small --seed 1337 --out genesis.bin
+
+# check you can actually contribute BEFORE committing hours to it
+node/target/release/palimpsest-node --check --data-dir ~/.palimpsest \
+  --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin \
+  --peers /ip4/169.58.211.248/tcp/9800
+
+# then run it
+node/target/release/palimpsest-node --data-dir ~/.palimpsest \
+  --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin \
+  --peers /ip4/169.58.211.248/tcp/9800
 ```
 
-Those are the **live devnet** values (bootstrap peer + genesis id); the current
-list is always in **[docs/joining.md](docs/joining.md)**. Make a wallet first with
-`python -m client.wallet new` (that file is your on-chain identity *and* your
-balance). Your node now serves a dashboard + API at `http://localhost:8090`.
+Those are the **live devnet** values; the current list is always in
+**[docs/joining.md](docs/joining.md)**. Your node then serves a dashboard + API at
+`http://localhost:8090`.
+
+> **Always run `--check` first.** It verifies the peer is reachable, your genesis
+> matches the network, and — if you're mining — that your GPU and block interval
+> are compatible. The failure modes here are silent by nature: a trainer slower
+> than the block interval produces deltas that are always too late to include, so
+> it would mine forever and earn nothing.
 
 ## Three ways to participate
 

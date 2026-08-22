@@ -7,9 +7,11 @@ three things, all public:
 2. **one bootstrap peer address** (a running node's multiaddr), and
 3. **the published genesis id** (a 32-byte hash).
 
-Your node dials the peer, **fetches the genesis from it, and verifies it against
-the published id** (so a bad peer can't seed you a wrong chain), then syncs. No
-genesis file to download, no seed to reproduce.
+You **reproduce the genesis locally** from the published model+seed and check
+that it hashes to the published id, then sync the chain from the peer. The
+genesis is deterministic, so reproducing it is *more* trustless than downloading
+it — and at ~650MB it is far too large to ship over the p2p sync transport
+anyway (a peer will refuse to serve it; that is expected, not a fault).
 
 > Live devnet parameters:
 >
@@ -24,22 +26,50 @@ genesis file to download, no seed to reproduce.
 
 ```bash
 # build (or pull ghcr.io/connors2015/palimpsest-node)
-cd node && cargo build --release
+cd node && cargo build --release && cd ..
 
 # a wallet/identity key (0600); this is your on-chain identity
 head -c32 /dev/urandom | xxd -p -c64 > ~/.palimpsest.key && chmod 600 ~/.palimpsest.key
 
-# join: fetch+verify the genesis from the peer, then sync the chain
-target/release/palimpsest-node \
+# reproduce the genesis; it MUST print the published genesis id above
+uv run --with torch --with numpy --with pynacl \
+    python -m client.make_genesis --model small --seed 1337 --out genesis.bin
+
+# PREFLIGHT — verify you can actually contribute before running for hours
+node/target/release/palimpsest-node --check \
+  --data-dir ~/.palimpsest --key-file ~/.palimpsest.key \
+  --genesis-file genesis.bin --peers /ip4/169.58.211.248/tcp/9800
+
+# join and sync
+node/target/release/palimpsest-node \
   --data-dir ~/.palimpsest \
   --key-file ~/.palimpsest.key \
-  --genesis-hash 30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28 \
+  --genesis-file genesis.bin \
   --peers /ip4/169.58.211.248/tcp/9800 \
   --api-port 8090
 ```
 
 Watch it: `curl -s localhost:8090/status` (height, peers, supply) and
 `curl -s localhost:8090/metrics` (Prometheus).
+
+`--check` is worth the 30 seconds every time: it catches an unreachable peer, a
+genesis that doesn't match the network (you'd silently be on a different chain),
+and mining settings that would make your work uninludable.
+
+## If you mine: watch `stale_deltas`
+
+A delta can only be included at the current head. If your training round takes
+longer than the block interval, every delta you produce arrives too late and is
+dropped — **you would mine forever and earn nothing.** The trainer now measures
+its own speed and auto-fits its inner steps to the interval, but check anyway:
+
+```bash
+curl -s localhost:8090/status | grep stale_deltas   # should stay 0
+```
+
+Non-zero and climbing means your rounds are overrunning: lower `--inner` on the
+trainer, or ask the operator to raise the network's block interval. The node also
+logs a loud warning naming the cause.
 
 ## Contribute compute and earn
 

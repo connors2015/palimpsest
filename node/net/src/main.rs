@@ -75,6 +75,12 @@ struct Args {
     data_refs: String,       // rev 5: comma-separated data_hashes of the staked
                              // corpora this miner trains on; named on every delta
                              // for provenance (empty deltas are rejected)
+    /// PREFLIGHT: verify this machine can actually contribute — peer reachable,
+    /// genesis id matches, identity/disk usable, and (with --interval) whether a
+    /// training round can finish inside the block window. Prints a verdict and
+    /// exits without touching the chain. Run this BEFORE mining for hours.
+    #[arg(long, default_value_t = false)]
+    check: bool,
     #[arg(long, default_value_t = false)]
     relay_server: bool,      // seeds: relay NAT'd peers (circuit relay v2)
     #[arg(long, default_value = "")]
@@ -170,8 +176,27 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
         (0..args.toy_dim as i64).map(|i| i * 100).collect()
     } else if !args.genesis_hash.is_empty() {
         info!(id = %args.genesis_hash, "no local genesis — fetching it from the network");
-        fetch_genesis(swarm, &args.genesis_hash, &args.peers).await
-            .expect("could not fetch a genesis matching --genesis-hash from any peer")
+        match fetch_genesis(swarm, &args.genesis_hash, &args.peers).await {
+            Some(g) => g,
+            // Peer-fetch only works for genesis vectors that fit the sync
+            // response cap. The production model is ~650MB raw, far over it, so
+            // this path fails by design there — don't leave the operator staring
+            // at a 3-minute hang and a bare panic. The genesis is DETERMINISTIC,
+            // so generating it locally is both faster and trustless.
+            None => panic!("{}", [
+                "could not fetch a genesis matching --genesis-hash from any peer.",
+                "",
+                "For the production model this is expected: the genesis (~650MB) is",
+                "far larger than the sync transport can carry. Generate it locally —",
+                "it is deterministic, so this is trustless, and faster than a download:",
+                "",
+                "  uv run --with torch --with numpy --with pynacl \\",
+                "      python -m client.make_genesis --model small --seed 1337 --out genesis.bin",
+                "",
+                "then re-run with --genesis-file genesis.bin (the printed",
+                "genesis_state_root must equal the published genesis id).",
+            ].join("\n")),
+        }
     } else {
         panic!("genesis required: --genesis-file, --toy-dim, or --genesis-hash + --peers");
     };
@@ -182,6 +207,122 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
 /// Fetch the genesis weights from a peer and verify they hash to the expected
 /// genesis id before adopting them (so a malicious peer can't seed a wrong
 /// genesis). Times out after a few minutes with no matching response.
+/// PREFLIGHT (`--check`): answer "can this machine actually contribute?" before
+/// the operator spends hours finding out it can't. Every check prints PASS/WARN/
+/// FAIL with the concrete remedy — this exists because the failure modes here are
+/// silent by nature (a too-slow trainer mines forever and earns nothing).
+async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
+                   swarm: &mut libp2p::Swarm<node::Behaviour>)
+                   -> Result<(), Box<dyn std::error::Error>> {
+    use futures::StreamExt;
+    let (mut fails, mut warns) = (0u32, 0u32);
+    let pass = |m: String| println!("  \x1b[32mPASS\x1b[0m  {m}");
+    println!("\npalimpsest preflight — can this machine contribute?\n");
+
+    // 1. identity + data dir (already opened above, so both are usable)
+    pass(format!("identity loaded — miner {} / address {}",
+                 &key.pub_hex()[..12], &core::token::address(&key.pub_hex())[..12]));
+    pass(format!("data dir writable + exclusively locked ({})", args.data_dir));
+    if store.read_genesis().is_some() {
+        pass("existing chain on disk — will resume from it".into());
+    }
+
+    // 2. peer reachability: can we actually dial the bootstrap?
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut connected = 0usize;
+    while std::time::Instant::now() < deadline {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                connected = swarm.connected_peers().count();
+                if connected > 0 { break }
+                node::dial_peers(swarm, &args.peers);
+            }
+            _ = swarm.select_next_some() => {
+                connected = swarm.connected_peers().count();
+                if connected > 0 { break }
+            }
+        }
+    }
+    if args.peers.is_empty() {
+        println!("  \x1b[33mWARN\x1b[0m  no --peers given — this node will be alone \
+                  (fine for a local devnet, not for joining)");
+        warns += 1;
+    } else if connected > 0 {
+        pass(format!("bootstrap reachable — {connected} peer(s) connected"));
+    } else {
+        println!("  \x1b[31mFAIL\x1b[0m  cannot reach any peer in --peers within 30s.");
+        println!("        Check the address/port and that outbound TCP is allowed.");
+        fails += 1;
+    }
+
+    // 3. genesis agreement — the thing that silently forks you off the network
+    if !args.genesis_hash.is_empty() {
+        if connected > 0 {
+            match fetch_genesis(swarm, &args.genesis_hash, &args.peers).await {
+                Some(g) => pass(format!(
+                    "genesis verified against the published id ({} params)", g.len())),
+                None => {
+                    println!("  \x1b[33mWARN\x1b[0m  no peer served a genesis \
+                              matching the published id.");
+                    println!("        For the production model this is EXPECTED: \
+                              the genesis (~650MB) is too large to ship over the");
+                    println!("        sync transport. Generate it locally instead \
+                              — it is deterministic, so this is trustless:");
+                    println!("          uv run --with torch --with numpy --with \
+                              pynacl python -m client.make_genesis \\");
+                    println!("              --model small --seed 1337 --out genesis.bin");
+                    println!("        then run with --genesis-file genesis.bin \
+                              (its printed state_root must equal the published id).");
+                    warns += 1;
+                }
+            }
+        }
+    } else if args.genesis_file.is_empty() && args.toy_dim == 0
+              && store.read_genesis().is_none() {
+        println!("  \x1b[31mFAIL\x1b[0m  no genesis source: pass --genesis-hash \
+                  (to fetch+verify from a peer), --genesis-file, or --toy-dim.");
+        fails += 1;
+    }
+
+    // 4. the mining-viability check — the silent killer. A delta is includable
+    //    only at base_height == head, so a round slower than the block interval
+    //    is ALWAYS dropped. We can't time the GPU from here (that's the
+    //    trainer's job, and it now auto-fits), but we can state the budget so
+    //    the operator can compare it against their measured round time.
+    if args.produce {
+        let budget = args.interval * 0.6;
+        pass(format!("producing with --interval {:.0}s → trainer budget ~{:.0}s \
+                      per round (it auto-fits its steps to this)",
+                     args.interval, budget));
+        if args.interval < 60.0 {
+            println!("  \x1b[33mWARN\x1b[0m  --interval {:.0}s is tight for a real \
+                      network: multi-MB deltas may not propagate to the proposer \
+                      in time, so your work would be orphaned. 120–180s is safer.",
+                     args.interval);
+            warns += 1;
+        }
+        if args.data_refs.is_empty() {
+            println!("  \x1b[31mFAIL\x1b[0m  --produce without --data-refs: every \
+                      delta you submit will be REJECTED (provenance is required).");
+            println!("        Use --data-refs genesis, or the data_hash of a \
+                      corpus you have staked.");
+            fails += 1;
+        } else {
+            pass(format!("provenance set — deltas will name: {}", args.data_refs));
+        }
+    } else {
+        pass("watch/serve mode (no --produce) — will sync and serve, not mine".into());
+    }
+
+    println!("\n{}\n", match (fails, warns) {
+        (0, 0) => "\x1b[32mREADY\x1b[0m — this machine can contribute.".to_string(),
+        (0, w) => format!("\x1b[33mREADY WITH {w} WARNING(S)\x1b[0m — see above."),
+        (f, _) => format!("\x1b[31mNOT READY — {f} blocking problem(s)\x1b[0m."),
+    });
+    if fails > 0 { std::process::exit(1) }
+    Ok(())
+}
+
 async fn fetch_genesis(swarm: &mut libp2p::Swarm<node::Behaviour>,
                        expected_hash: &str, peers: &str) -> Option<Vec<i64>> {
     use futures::StreamExt;
@@ -270,8 +411,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let topic = libp2p::gossipsub::IdentTopic::new("palimpsest/v1");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-    swarm.listen_on(format!("/ip4/{}/udp/{}/quic-v1", args.listen_bind, args.port).parse::<Multiaddr>()?)?;
-    swarm.listen_on(format!("/ip4/{}/tcp/{}", args.listen_bind, args.port).parse::<Multiaddr>()?)?;
+    // preflight binds an EPHEMERAL port: it must be runnable while your real
+    // node is already up, otherwise the check you most want to run is the one
+    // you can't ("Address already in use").
+    let listen_port = if args.check { 0 } else { args.port };
+    swarm.listen_on(format!("/ip4/{}/udp/{}/quic-v1", args.listen_bind, listen_port).parse::<Multiaddr>()?)?;
+    swarm.listen_on(format!("/ip4/{}/tcp/{}", args.listen_bind, listen_port).parse::<Multiaddr>()?)?;
     if !args.external_address.is_empty() {
         match args.external_address.parse::<Multiaddr>() {
             Ok(a) => swarm.add_external_address(a),
@@ -279,6 +424,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     node::dial_peers(&mut swarm, &args.peers);
+
+    if args.check {
+        return preflight(&args, &consensus_key, &store, &mut swarm).await;
+    }
 
     // genesis: local disk -> --genesis-file -> --toy-dim -> FETCH from a peer,
     // verified against the published --genesis-hash. The genesis is public and
