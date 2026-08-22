@@ -38,7 +38,7 @@ spec:
               set -e
               if [ -f /data/genesis-seed.bin ]; then exit 0; fi
               # public repo: plain HTTPS clone, no deploy key needed
-              git clone --depth 1 https://github.com/connors2015/sestrian.git /app
+              git clone --depth 1 https://github.com/sestrian/sestrian.git /app
               cd /app
               pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
               pip install --no-cache-dir numpy pynacl
@@ -48,7 +48,7 @@ spec:
       containers:
         - name: seed
           # CI builds + pushes this by git SHA; pin a digest in production.
-          image: ghcr.io/connors2015/sestrian-node:latest
+          image: ghcr.io/sestrian/sestrian-node:latest
           args:
             - --data-dir=/data
             - --genesis-file=/data/genesis-seed.bin

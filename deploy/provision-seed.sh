@@ -16,8 +16,8 @@
 #   * ufw: 22/tcp, 9800/tcp+udp (gossip+relay), 8080/tcp (API)
 set -euo pipefail
 
-REPO_SSH="git@github.com:connors2015/sestrian.git"
-REPO_HTTPS="https://github.com/connors2015/sestrian.git"
+REPO_SSH="git@github.com:sestrian/sestrian.git"
+REPO_HTTPS="https://github.com/sestrian/sestrian.git"
 GENESIS_SEED=1337
 GENESIS_MODEL=small
 DATA_CONTRIBUTOR="3432d48fd6878b4f2e7a1e40cc15e112c512fae7"

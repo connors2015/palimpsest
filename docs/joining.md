@@ -34,7 +34,7 @@ Running your own chain: `--network local`, and supply everything yourself.
 ## Run a node (watch + sync)
 
 ```bash
-# build (or pull ghcr.io/connors2015/sestrian-node)
+# build (or pull ghcr.io/sestrian/sestrian-node)
 cd node && cargo build --release && cd ..
 
 # a wallet/identity key (0600); this is your on-chain identity

@@ -2,6 +2,8 @@
 
 **A blockchain whose state is the weights of a single public neural network.**
 
+[sestrian.com](https://sestrian.com) · [live chain](http://169.58.211.248:8080/status) · [join the devnet](docs/joining.md)
+
 Transactions are the model's own computations. A *backprop* is a signed gradient
 that transitions the state and earns a reward; a *forward-prop* is an inference
 that pays a fee. Replaying the chain from genesis reconstructs the model
