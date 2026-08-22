@@ -9,11 +9,11 @@ FOUNDER=${FOUNDER:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}
 rm -rf /tmp/devnet0 /tmp/devnet1
 uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
     --model toy --seed 1337 --out /tmp/devnet_genesis.bin
-$B --data-dir /tmp/devnet0 --key-seed $(printf 'a%.0s' {1..64} | head -c 64) \
+$B --network local --data-dir /tmp/devnet0 --key-seed $(printf 'a%.0s' {1..64} | head -c 64) \
    --genesis-file /tmp/devnet_genesis.bin --port 7900 --api-port 8190 \
    --bridge-port 7999 --produce --interval 6 --rotate 2,0 --seconds $S \
    --data-contributor $FOUNDER > /tmp/devnet0.log 2>&1 &
-$B --data-dir /tmp/devnet1 --key-seed $(printf 'b%.0s' {1..64} | head -c 64) \
+$B --network local --data-dir /tmp/devnet1 --key-seed $(printf 'b%.0s' {1..64} | head -c 64) \
    --genesis-file /tmp/devnet_genesis.bin --port 7901 --api-port 8191 \
    --bridge-port 7998 --produce --interval 6 --rotate 2,1 --seconds $S \
    --peers /ip4/127.0.0.1/udp/7900/quic-v1 \

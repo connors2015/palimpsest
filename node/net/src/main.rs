@@ -30,8 +30,107 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+/// Baked-in network parameters — Bitcoin's `chainparams` model.
+///
+/// Consensus-critical values must NOT be user-supplied. Bitcoin hardcodes its
+/// genesis and consensus constants and lets you pick a *network* (`-testnet`,
+/// `-regtest`); there is no way to typo yourself onto a different chain. We
+/// previously took the genesis id, the genesis-ledger data-contributor, and the
+/// bootstrap peer as free-form flags — and omitting or mistyping any of them
+/// silently produced a node that could never validate a block. These now live
+/// here, in the binary, and a conflicting override is a hard error.
+///
+/// The genesis WEIGHTS can't be a literal (they're ~650MB), but they are
+/// deterministically derived from (model, seed) — so we bake the recipe and the
+/// expected state_root, generate/verify locally, and get the same guarantee.
+struct NetworkParams {
+    name: &'static str,
+    /// sha256 of the canonical genesis weight bytes; every node must match
+    genesis_state_root: &'static str,
+    /// seeds the founding corpus into the genesis LEDGER — consensus state
+    data_contributor: &'static str,
+    /// how to reproduce the genesis weights (client/make_genesis.py)
+    genesis_model: &'static str,
+    genesis_seed: u64,
+    bootstrap: &'static str,
+}
+
+const DEVNET: NetworkParams = NetworkParams {
+    name: "devnet",
+    genesis_state_root: "30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28",
+    data_contributor: "3432d48fd6878b4f2e7a1e40cc15e112c512fae7",
+    genesis_model: "small",
+    genesis_seed: 1337,
+    bootstrap: "/ip4/169.58.211.248/tcp/9800",
+};
+
+/// A private/local chain: nothing is baked, everything is explicit. This is the
+/// escape hatch for `scripts/devnet.sh`, tests, and anyone standing up their own
+/// network — the analogue of Bitcoin's `-regtest`.
+const LOCAL: NetworkParams = NetworkParams {
+    name: "local",
+    genesis_state_root: "",
+    data_contributor: "",
+    genesis_model: "toy",
+    genesis_seed: 1337,
+    bootstrap: "",
+};
+
+/// The exact command that reproduces a network's genesis — printed on every
+/// genesis failure so the remedy is never a search through the docs.
+fn genesis_recipe(network: &str) -> String {
+    let n = network_params(network);
+    format!("  uv run --with torch --with numpy --with pynacl \\\n    \
+             python -m client.make_genesis --model {} --seed {} --out genesis.bin\n  \
+             (it must print state_root {})",
+            n.genesis_model, n.genesis_seed,
+            if n.genesis_state_root.is_empty() { "<your own network's id>" }
+            else { n.genesis_state_root })
+}
+
+fn network_params(name: &str) -> &'static NetworkParams {
+    match name {
+        "devnet" => &DEVNET,
+        "local" => &LOCAL,
+        other => panic!("unknown --network '{other}' (known: devnet, local)"),
+    }
+}
+
+/// Fill unset flags from the selected network and REJECT conflicting overrides.
+/// Silence is the enemy here: a mismatch means a chain you can never join, so it
+/// must fail at startup with an explanation, not at block 1 with nothing.
+fn apply_network(args: &mut Args) -> &'static NetworkParams {
+    let net = network_params(&args.network);
+    let adopt = |field: &mut String, baked: &'static str, what: &str| {
+        if baked.is_empty() {
+            return;
+        }
+        if field.is_empty() {
+            *field = baked.to_string();
+        } else if field != baked {
+            panic!("--{what} does not match the '{}' network.\n  yours: {}\n  {}: {}\n\
+                    These are consensus parameters — a mismatch is a chain you can \
+                    never join. Omit the flag to use the network's value, or pass \
+                    --network local to run your own chain.",
+                   net.name, field, net.name, baked);
+        }
+    };
+    adopt(&mut args.data_contributor, net.data_contributor, "data-contributor");
+    adopt(&mut args.genesis_hash, net.genesis_state_root, "genesis-hash");
+    if args.peers.is_empty() && !net.bootstrap.is_empty() {
+        args.peers = net.bootstrap.to_string();       // extra peers may be added
+    }
+    net
+}
+
 #[derive(Parser, Debug)]
 struct Args {
+    /// Which network to join: `devnet` (the live network — genesis id, bootstrap
+    /// peer and genesis-ledger parameters are baked in) or `local` (your own
+    /// chain; supply everything yourself). Consensus values come from here, so
+    /// you cannot misconfigure yourself onto a chain that will never validate.
+    #[arg(long, default_value = "devnet")]
+    network: String,
     #[arg(long, default_value = "palimpsest-data")]
     data_dir: String,
     #[arg(long, default_value = "")]
@@ -198,8 +297,28 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
             ].join("\n")),
         }
     } else {
-        panic!("genesis required: --genesis-file, --toy-dim, or --genesis-hash + --peers");
+        panic!("{}", [
+            "no genesis available. Reproduce this network's genesis locally",
+            "(it is deterministic, so this is trustless) and pass it:",
+            "",
+            &genesis_recipe(&args.network),
+            "",
+            "  …then re-run with --genesis-file genesis.bin",
+        ].join("\n"));
     };
+    // Whatever the source, the weights must hash to the network's baked-in
+    // state_root. This is the check that makes a wrong --genesis-file a startup
+    // error instead of a node that quietly can't validate anything.
+    if !args.genesis_hash.is_empty() {
+        let got = core::state_root(&g);
+        if got != args.genesis_hash
+            && core::blocktree::genesis_block_hash(&g) != args.genesis_hash {
+            panic!("genesis does not match this network.\n  expected {}\n  got      {}\n\n\
+                    Regenerate it, or pass --network local to run your own chain:\n{}",
+                   args.genesis_hash, got, genesis_recipe(&args.network));
+        }
+        info!(params = g.len(), "genesis verified against the network's id");
+    }
     store.write_genesis(&g).expect("cannot persist genesis");
     g
 }
@@ -256,32 +375,42 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
     }
 
     // 3. genesis agreement — the thing that silently forks you off the network
-    if !args.genesis_hash.is_empty() {
-        if connected > 0 {
-            match fetch_genesis(swarm, &args.genesis_hash, &args.peers).await {
-                Some(g) => pass(format!(
-                    "genesis verified against the published id ({} params)", g.len())),
-                None => {
-                    println!("  \x1b[33mWARN\x1b[0m  no peer served a genesis \
-                              matching the published id.");
-                    println!("        For the production model this is EXPECTED: \
-                              the genesis (~650MB) is too large to ship over the");
-                    println!("        sync transport. Generate it locally instead \
-                              — it is deterministic, so this is trustless:");
-                    println!("          uv run --with torch --with numpy --with \
-                              pynacl python -m client.make_genesis \\");
-                    println!("              --model small --seed 1337 --out genesis.bin");
-                    println!("        then run with --genesis-file genesis.bin \
-                              (its printed state_root must equal the published id).");
-                    warns += 1;
-                }
+    // Verify whatever genesis we ALREADY have (on disk, or the given file)
+    // against the network's id — that's the cheap, offline, authoritative check.
+    // Only fall back to asking a peer when we have nothing locally.
+    let local_genesis: Option<Vec<i64>> = store.read_genesis().or_else(|| {
+        (!args.genesis_file.is_empty()).then(|| {
+            let raw = std::fs::read(&args.genesis_file)
+                .unwrap_or_else(|e| panic!("--genesis-file unreadable: {e}"));
+            raw.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
+        })
+    });
+    match (&local_genesis, args.genesis_hash.is_empty()) {
+        (Some(g), false) => {
+            let root = core::state_root(g);
+            if root == args.genesis_hash
+                || core::blocktree::genesis_block_hash(g) == args.genesis_hash {
+                pass(format!("genesis matches this network ({} params)", g.len()));
+            } else {
+                println!("  \x1b[31mFAIL\x1b[0m  your genesis does NOT match this network.");
+                println!("        expected {}", args.genesis_hash);
+                println!("        yours    {root}");
+                println!("        You would be on a different chain. Regenerate it:");
+                println!("{}", genesis_recipe(&args.network));
+                fails += 1;
             }
         }
-    } else if args.genesis_file.is_empty() && args.toy_dim == 0
-              && store.read_genesis().is_none() {
-        println!("  \x1b[31mFAIL\x1b[0m  no genesis source: pass --genesis-hash \
-                  (to fetch+verify from a peer), --genesis-file, or --toy-dim.");
-        fails += 1;
+        (Some(g), true) => pass(format!("genesis present ({} params); this network \
+                                         publishes no id to check it against", g.len())),
+        (None, _) if args.toy_dim > 0 =>
+            pass(format!("toy genesis of {} params (local chain)", args.toy_dim)),
+        (None, _) => {
+            println!("  \x1b[31mFAIL\x1b[0m  no genesis. Reproduce this network's \
+                      genesis locally (deterministic, so trustless):");
+            println!("{}", genesis_recipe(&args.network));
+            println!("        then pass --genesis-file genesis.bin");
+            fails += 1;
+        }
     }
 
     // 3b. --data-contributor is a GENESIS PARAMETER, not a preference: it seeds
@@ -290,19 +419,13 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
     //     NOTHING will ever validate — the node sits at height 0 forever,
     //     receiving blocks and silently discarding them. (Observed exactly that
     //     while testing the join flow.)
-    if !args.peers.is_empty() {
-        if args.data_contributor.is_empty() {
-            println!("  \x1b[31mFAIL\x1b[0m  joining a network without \
-                      --data-contributor: it is a GENESIS parameter.");
-            println!("        Without the network's exact value your genesis \
-                      ledger differs, every block fails");
-            println!("        validation, and you stay at height 0 forever. See \
-                      docs/joining.md for the value.");
-            fails += 1;
-        } else {
-            pass(format!("genesis ledger parameter set — data-contributor {}",
-                         &args.data_contributor[..12.min(args.data_contributor.len())]));
-        }
+    if !args.data_contributor.is_empty() {
+        pass(format!("genesis-ledger parameter from the network — data-contributor {}",
+                     &args.data_contributor[..12.min(args.data_contributor.len())]));
+    } else if !args.peers.is_empty() {
+        println!("  \x1b[33mWARN\x1b[0m  no data-contributor for this network — \
+                  only correct if the chain was launched without one.");
+        warns += 1;
     }
 
     // 4. the mining-viability check — the silent killer. A delta is includable
@@ -395,7 +518,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("info,libp2p=warn")))
         .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
+    let net = apply_network(&mut args);
+    let args = args;
+    info!(network = net.name, "consensus parameters from the baked-in network");
 
     let seed = load_identity(&args);
     let consensus_key = core::Key::from_seed(seed);

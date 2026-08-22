@@ -22,14 +22,14 @@ uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
     --model toy --seed 1337 --out /tmp/soak_genesis.bin
 
 start_n0() {
-  $B --data-dir /tmp/soak0 --key-seed "$A" --genesis-file /tmp/soak_genesis.bin \
+  $B --network local --data-dir /tmp/soak0 --key-seed "$A" --genesis-file /tmp/soak_genesis.bin \
      --port 7910 --api-port 8110 --bridge-port 7989 --produce --interval 6 \
      --rotate 2,0 --seconds "$1" --data-contributor "$FOUNDER" >> /tmp/soak0.log 2>&1 &
   echo $!
 }
 : > /tmp/soak0.log; : > /tmp/soak1.log
 N0=$(start_n0 "$S")
-$B --data-dir /tmp/soak1 --key-seed "$Bk" --genesis-file /tmp/soak_genesis.bin \
+$B --network local --data-dir /tmp/soak1 --key-seed "$Bk" --genesis-file /tmp/soak_genesis.bin \
    --port 7911 --api-port 8111 --bridge-port 7988 --produce --interval 6 \
    --rotate 2,1 --seconds "$S" --peers /ip4/127.0.0.1/udp/7910/quic-v1 \
    --data-contributor "$FOUNDER" >> /tmp/soak1.log 2>&1 &

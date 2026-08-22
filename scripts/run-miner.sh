@@ -25,10 +25,12 @@ pkill -f "client\.miner_bridge.*$BRIDGE" 2>/dev/null
 sleep 1
 
 setsid nohup "$BIN" \
+  --network "${NETWORK:-devnet}" \
   --data-dir "$DATADIR" --wallet "$WALLET" --genesis-file "$GENESIS" \
   --port "$PORT" --api-port "$API" --bridge-port "$BRIDGE" \
-  --produce --interval 60 --peers "$PEERS" \
+  --produce --interval "${INTERVAL:-180}" --peers "$PEERS" \
   --data-contributor "$FOUNDER" \
+  --data-refs "${DATA_REFS:-genesis}" \
   > /tmp/palimpsest-node.log 2>&1 < /dev/null &
 # validated chain replay at boot takes ~5s/block at 86M scale — poll patiently
 for i in $(seq 1 120); do

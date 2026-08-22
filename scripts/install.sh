@@ -10,14 +10,11 @@
 set -euo pipefail
 
 # --- live devnet parameters (see docs/joining.md) ---------------------------
-PEER="${PALIMPSEST_PEER:-/ip4/169.58.211.248/tcp/9800}"
+NETWORK="${PALIMPSEST_NETWORK:-devnet}"
 GENESIS_ID="${PALIMPSEST_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
 MODEL="${PALIMPSEST_MODEL:-small}"
 GENESIS_SEED="${PALIMPSEST_GENESIS_SEED:-1337}"
 INTERVAL="${PALIMPSEST_INTERVAL:-180}"
-# GENESIS PARAMETER: seeds the founding corpus into the genesis ledger. Must be
-# byte-identical on every node of the network or nothing validates.
-DATA_CONTRIBUTOR="${PALIMPSEST_DATA_CONTRIBUTOR:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}"
 
 MINE=0; SERVICE=0
 for arg in "$@"; do
@@ -91,8 +88,10 @@ fi
 REFS="${PALIMPSEST_DATA_REFS:-genesis}"
 
 say "preflight"
-ARGS=(--data-dir "$HOME_DIR/nodedata" --wallet "$WALLET" --genesis-file "$GEN"
-      --peers "$PEER" --api-port 8090 --data-contributor "$DATA_CONTRIBUTOR")
+# Consensus params (bootstrap peer, genesis id, genesis-ledger contributor) are
+# baked into the binary and selected by --network — nothing here can fork you.
+ARGS=(--network "$NETWORK" --data-dir "$HOME_DIR/nodedata" --wallet "$WALLET"
+      --genesis-file "$GEN" --api-port 8090)
 [ "$MINE" = 1 ] && ARGS+=(--produce --interval "$INTERVAL" --data-refs "$REFS")
 "$BIN" --check "${ARGS[@]}" || { echo "preflight failed — fix the above first."; exit 1; }
 

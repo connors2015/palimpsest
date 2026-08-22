@@ -23,11 +23,13 @@ anyway (a peer will refuse to serve it; that is expected, not a fault).
 > | **data-contributor** | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
 > | public API | `http://169.58.211.248:8080/status` |
 
-**`--data-contributor` is a genesis parameter, not a preference.** It seeds the
-founding corpus into the genesis ledger, so every node must pass the identical
-value. Omit it and your ledger differs from block 1: you will connect, receive
-blocks, silently discard all of them, and sit at height 0 forever. `--check`
-fails loudly if it is missing.
+**You do not pass any of these.** Like Bitcoin's `-testnet`, they are compiled
+into the binary and selected with `--network devnet` (the default) — the table is
+here so you can verify what your node is using, not so you can type it in.
+Consensus values were briefly free-form flags; omitting `--data-contributor`
+produced a node that connected, received blocks, discarded every one, and sat at
+height 0 forever with no error. Now a contradicting flag is a startup error.
+Running your own chain: `--network local`, and supply everything yourself.
 
 ## Run a node (watch + sync)
 
@@ -44,17 +46,13 @@ uv run --with torch --with numpy --with pynacl \
 
 # PREFLIGHT — verify you can actually contribute before running for hours
 node/target/release/palimpsest-node --check \
-  --data-dir ~/.palimpsest --key-file ~/.palimpsest.key \
-  --genesis-file genesis.bin --peers /ip4/169.58.211.248/tcp/9800 \
-  --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
+  --data-dir ~/.palimpsest --key-file ~/.palimpsest.key --genesis-file genesis.bin
 
 # join and sync
 node/target/release/palimpsest-node \
   --data-dir ~/.palimpsest \
   --key-file ~/.palimpsest.key \
   --genesis-file genesis.bin \
-  --peers /ip4/169.58.211.248/tcp/9800 \
-  --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7 \
   --api-port 8090
 ```
 

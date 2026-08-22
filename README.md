@@ -51,19 +51,20 @@ uv run --with torch --with numpy --with pynacl \
     python -m client.make_genesis --model small --seed 1337 --out genesis.bin
 
 # check you can actually contribute BEFORE committing hours to it
-node/target/release/palimpsest-node --check --data-dir ~/.palimpsest \
-  --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin \
-  --peers /ip4/169.58.211.248/tcp/9800 --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
+node/target/release/palimpsest-node --check \
+  --data-dir ~/.palimpsest --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin
 
 # then run it
-node/target/release/palimpsest-node --data-dir ~/.palimpsest \
-  --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin \
-  --peers /ip4/169.58.211.248/tcp/9800 --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
+node/target/release/palimpsest-node \
+  --data-dir ~/.palimpsest --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin
 ```
 
-Those are the **live devnet** values; the current list is always in
-**[docs/joining.md](docs/joining.md)**. Your node then serves a dashboard + API at
-`http://localhost:8090`.
+There are no chain parameters to get right: like Bitcoin's `-testnet`, the
+network's genesis id, bootstrap peer and genesis-ledger constants are **baked
+into the binary** (`--network devnet`, the default). Passing a value that
+contradicts the network is a startup error, not a silent fork. Running your own
+chain? `--network local` and supply everything yourself. Your node serves a
+dashboard + API at `http://localhost:8090`.
 
 > **Always run `--check` first.** It verifies the peer is reachable, your genesis
 > matches the network, and — if you're mining — that your GPU and block interval
