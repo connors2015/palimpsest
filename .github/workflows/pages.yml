@@ -1,0 +1,46 @@
+name: pages
+
+# Publish site/ to sestrian.com. The CNAME file in site/ pins the custom domain,
+# so a deploy can never silently drop it.
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; don't cancel one in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sanity-check the site before publishing
+        run: |
+          test -f site/index.html || { echo "site/index.html missing"; exit 1; }
+          grep -q sestrian.com site/CNAME || { echo "CNAME must pin sestrian.com"; exit 1; }
+          # the published genesis id is a promise to testers — never ship a page
+          # that contradicts the id compiled into the node
+          if grep -rqo '[0-9a-f]\{64\}' site/*.html; then
+            want=$(grep -o 'genesis_state_root: "[0-9a-f]*"' node/net/src/main.rs | head -1 | grep -o '[0-9a-f]\{64\}')
+            for got in $(grep -rho '[0-9a-f]\{64\}' site/*.html | sort -u); do
+              [ "$got" = "$want" ] || echo "note: site mentions hash $got (network id is $want)"
+            done
+          fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
