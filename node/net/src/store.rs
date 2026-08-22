@@ -140,37 +140,57 @@ impl Store {
     pub const DA_K: usize = 4;
     pub const DA_N: usize = 12;
 
-    /// Erasure-code + Merkle-commit a payload into N shards under da/<txid>/, so
-    /// the body is recoverable from any K of them. Returns the DA root (hex) that
-    /// commits the shard set. Idempotent.
-    pub fn disperse_payload(&self, txid: &str, p: &Payload) -> Option<String> {
-        let dir = self.dir.join("da").join(txid);
+    /// Reserved DA key for the genesis weight vector. Cannot collide with a txid
+    /// (always 64 hex chars), so the existing shard-exchange protocol — which is
+    /// keyed by string id — carries the genesis with no wire change.
+    pub const GENESIS_DA_KEY: &'static str = "__genesis__";
+    /// The genesis needs its own K/N. At the delta K=4 a ~650MB genesis shard
+    /// would be ~163MB — far over the 96MB shard-response cap, so it could never
+    /// be served. K=16 puts a shard at ~43MB (~57MB base64), which fits one per
+    /// response. N=48 keeps the same 3x redundancy the delta bodies use.
+    pub const GENESIS_DA_K: usize = 16;
+    pub const GENESIS_DA_N: usize = 48;
+
+    /// Erasure-code + Merkle-commit raw bytes into n shards under da/<key>/, so
+    /// they are recoverable from any k. Returns the DA root (hex). Idempotent.
+    ///
+    /// Streams the shards to disk one at a time: the genesis is ~650MB and the
+    /// all-at-once path would need several GB of RAM to hold the expanded blob.
+    pub fn disperse_bytes(&self, key: &str, bytes: &[u8], k: usize, n: usize)
+        -> Option<String>
+    {
+        let dir = self.dir.join("da").join(key);
         let meta_path = dir.join("meta.json");
         if let Ok(m) = fs::read(&meta_path) {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&m) {
-                if let Some(r) = v["root"].as_str() {
-                    return Some(r.to_string()); // already dispersed
+                match v["root"].as_str() {
+                    Some(r) if !r.is_empty() => return Some(r.to_string()), // already dispersed
+                    _ => {} // shards fetched from peers (root ""): re-derive below
                 }
             }
         }
-        let bytes = serde_json::to_vec(p).ok()?;
-        let blob = palimpsest_core::da::disperse(&bytes, Self::DA_K, Self::DA_N);
         fs::create_dir_all(&dir).ok()?;
-        for (i, sh) in blob.shards.iter().enumerate() {
-            let _ = fs::write(dir.join(format!("{i}.shard")), sh);
+        let mut write_err = None;
+        let root = palimpsest_core::da::disperse_streaming(bytes, k, n, |i, sh| {
+            if let Err(e) = fs::write(dir.join(format!("{i}.shard")), sh) {
+                write_err.get_or_insert(e);
+            }
+        });
+        if let Some(e) = write_err {
+            warn!(%key, "failed to write DA shards: {e}");
+            return None;
         }
-        let root = hex::encode(blob.root());
+        let root = hex::encode(root);
         let meta = serde_json::json!({
-            "root": root, "orig_len": bytes.len(), "k": Self::DA_K, "n": Self::DA_N,
+            "root": root, "orig_len": bytes.len(), "k": k, "n": n,
         });
         let _ = fs::write(&meta_path, meta.to_string());
         Some(root)
     }
 
-    /// Reconstruct a payload from whatever shards survive on disk (needs >= K).
-    /// None if too few shards remain (the body is unrecoverable locally).
-    pub fn reconstruct_payload(&self, txid: &str) -> Option<Payload> {
-        let dir = self.dir.join("da").join(txid);
+    /// Reconstruct raw bytes from whatever shards survive on disk (needs >= K).
+    pub fn reconstruct_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        let dir = self.dir.join("da").join(key);
         let meta: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("meta.json")).ok()?).ok()?;
         let k = meta["k"].as_u64()? as usize;
@@ -184,8 +204,61 @@ impl Store {
                 }
             }
         }
-        let bytes = palimpsest_core::da::reconstruct(&shards, k, orig_len)?;
-        serde_json::from_slice(&bytes).ok()
+        palimpsest_core::da::reconstruct(&shards, k, orig_len)
+    }
+
+    /// Erasure-code + Merkle-commit a payload into N shards under da/<txid>/, so
+    /// the body is recoverable from any K of them. Returns the DA root (hex) that
+    /// commits the shard set. Idempotent.
+    pub fn disperse_payload(&self, txid: &str, p: &Payload) -> Option<String> {
+        let bytes = serde_json::to_vec(p).ok()?;
+        self.disperse_bytes(txid, &bytes, Self::DA_K, Self::DA_N)
+    }
+
+    /// Reconstruct a payload from whatever shards survive on disk (needs >= K).
+    /// None if too few shards remain (the body is unrecoverable locally).
+    pub fn reconstruct_payload(&self, txid: &str) -> Option<Payload> {
+        serde_json::from_slice(&self.reconstruct_bytes(txid)?).ok()
+    }
+
+    /// Disperse the GENESIS weights so this node can serve them to joiners as
+    /// erasure shards. Shards sidestep the block-sync response cap entirely, so
+    /// this is what lets a fresh node bootstrap the ~650MB genesis peer-to-peer
+    /// instead of regenerating it locally (needs torch) or downloading it from a
+    /// single host. Idempotent; safe to call on every boot.
+    pub fn disperse_genesis(&self, g: &[i64]) -> Option<String> {
+        self.disperse_bytes(Self::GENESIS_DA_KEY, &palimpsest_core::int64_bytes(g),
+                            Self::GENESIS_DA_K, Self::GENESIS_DA_N)
+    }
+
+    /// Rebuild the genesis weights from any K genesis shards on disk.
+    pub fn reconstruct_genesis(&self) -> Option<Vec<i64>> {
+        let raw = self.reconstruct_bytes(Self::GENESIS_DA_KEY)?;
+        Some(raw.chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect())
+    }
+
+    /// Shard indices we hold for a body, WITHOUT reading the shard bytes. The
+    /// genesis shard set is ~2GB, so serving must never slurp it all to pick one.
+    pub fn list_shard_indices(&self, key: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.dir.join("da").join(key)) {
+            for e in rd.flatten() {
+                if let Ok(name) = e.file_name().into_string() {
+                    if let Some(i) = name.strip_suffix(".shard")
+                        .and_then(|s| s.parse::<u32>().ok()) {
+                        out.push(i);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Read one shard by index.
+    pub fn read_shard(&self, key: &str, i: u32) -> Option<Vec<u8>> {
+        fs::read(self.dir.join("da").join(key).join(format!("{i}.shard"))).ok()
     }
 
     /// (k, n, orig_len) for a body's shard set, if we have its DA metadata.
@@ -569,6 +642,116 @@ mod store_tests {
         assert_eq!((got.n, got.idx, got.val), (p.n, p.idx.clone(), p.val.clone()));
         let _ = fs::remove_dir_all(&dir_a);
         let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn genesis_round_trips_through_da_shards() {
+        // The join path for a fresh node: reconstruct the genesis from erasure
+        // shards instead of regenerating it (needs torch) or downloading it whole
+        // (exceeds the sync response cap).
+        let dir = tmpdir("da-genesis");
+        let store = Store::open(dir.to_str().unwrap()).unwrap();
+        let g: Vec<i64> = (0..5000i64).map(|i| i.wrapping_mul(7_919) - 1_234).collect();
+        let root = store.disperse_genesis(&g).expect("dispersal must succeed");
+        assert_eq!(root.len(), 64, "root is a hex sha256");
+        assert_eq!(store.reconstruct_genesis().as_ref(), Some(&g),
+                   "all shards present must reconstruct the exact genesis");
+
+        // idempotent: a second call returns the same root without re-encoding
+        assert_eq!(store.disperse_genesis(&g).as_deref(), Some(root.as_str()));
+
+        let (k, n, orig) = store.shard_meta(Store::GENESIS_DA_KEY).unwrap();
+        assert_eq!((k, n, orig), (Store::GENESIS_DA_K, Store::GENESIS_DA_N,
+                                  (g.len() * 8) as u64));
+        assert_eq!(store.list_shard_indices(Store::GENESIS_DA_KEY).len(), n);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn genesis_reconstructs_from_exactly_k_shards_and_fails_below() {
+        let dir = tmpdir("da-genesis-k");
+        let store = Store::open(dir.to_str().unwrap()).unwrap();
+        let g: Vec<i64> = (0..2048i64).map(|i| i * i - 3).collect();
+        store.disperse_genesis(&g).unwrap();
+        let (k, n, _) = store.shard_meta(Store::GENESIS_DA_KEY).unwrap();
+        let da = dir.join("da").join(Store::GENESIS_DA_KEY);
+
+        // drop N-K shards — exactly K remain, which must still reconstruct
+        for i in 0..(n - k) {
+            fs::remove_file(da.join(format!("{i}.shard"))).unwrap();
+        }
+        assert_eq!(store.list_shard_indices(Store::GENESIS_DA_KEY).len(), k);
+        assert_eq!(store.reconstruct_genesis().as_ref(), Some(&g),
+                   "exactly K shards must reconstruct");
+
+        // one more gone → below K → unrecoverable, and it must fail cleanly
+        fs::remove_file(da.join(format!("{}.shard", n - k))).unwrap();
+        assert!(store.reconstruct_genesis().is_none(), "below K must not reconstruct");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn genesis_shards_gathered_from_a_peer_reconstruct() {
+        // What the bootstrap actually does: a fresh node holds no genesis, pulls
+        // K shards one at a time from a peer via put_shard, and rebuilds it.
+        let dir_a = tmpdir("da-gen-a");
+        let a = Store::open(dir_a.to_str().unwrap()).unwrap();
+        let g: Vec<i64> = (0..3000i64).map(|i| 42 - i * 5).collect();
+        a.disperse_genesis(&g).unwrap();
+        let (k, n, orig) = a.shard_meta(Store::GENESIS_DA_KEY).unwrap();
+
+        let dir_b = tmpdir("da-gen-b");
+        let b = Store::open(dir_b.to_str().unwrap()).unwrap();
+        assert!(b.reconstruct_genesis().is_none(), "fresh node has nothing");
+        // pull K shards, checking it stays unrecoverable until the K'th arrives
+        for (count, i) in a.list_shard_indices(Store::GENESIS_DA_KEY)
+            .into_iter().take(k).enumerate()
+        {
+            let data = a.read_shard(Store::GENESIS_DA_KEY, i).unwrap();
+            b.put_shard(Store::GENESIS_DA_KEY, i, &data, k, n, orig);
+            if count + 1 < k {
+                assert!(b.reconstruct_genesis().is_none(),
+                        "only {} of {k} shards — must not reconstruct yet", count + 1);
+            }
+        }
+        assert_eq!(b.reconstruct_genesis().as_ref(), Some(&g),
+                   "K shards pulled from a peer rebuild the genesis exactly");
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    /// Capacity check against a REAL genesis, for planning the one-time cost a
+    /// node pays to become a genesis source. Ignored by default (needs a real
+    /// genesis.bin and writes ~3x its size):
+    ///   PALIMPSEST_GENESIS_BIN=~/.palimpsest/genesis.bin \
+    ///     cargo test -p palimpsest-node genesis_dispersal_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn genesis_dispersal_cost() {
+        let Ok(path) = std::env::var("PALIMPSEST_GENESIS_BIN") else {
+            eprintln!("set PALIMPSEST_GENESIS_BIN to run this"); return;
+        };
+        let raw = fs::read(&path).expect("genesis.bin unreadable");
+        let g: Vec<i64> = raw.chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+        let dir = tmpdir("da-genesis-cost");
+        let store = Store::open(dir.to_str().unwrap()).unwrap();
+        let t0 = std::time::Instant::now();
+        let root = store.disperse_genesis(&g).expect("dispersal");
+        let disperse_s = t0.elapsed().as_secs_f64();
+        let shard_bytes = fs::metadata(dir.join("da").join(Store::GENESIS_DA_KEY)
+            .join("0.shard")).unwrap().len();
+        let t1 = std::time::Instant::now();
+        let back = store.reconstruct_genesis().expect("reconstruct");
+        let reconstruct_s = t1.elapsed().as_secs_f64();
+        assert_eq!(back, g, "round trip must be exact");
+        eprintln!("genesis {:.0}MB params={} -> k={} n={} shard={:.1}MB total={:.2}GB",
+                  raw.len() as f64 / 1e6, g.len(), Store::GENESIS_DA_K,
+                  Store::GENESIS_DA_N, shard_bytes as f64 / 1e6,
+                  (shard_bytes as f64 * Store::GENESIS_DA_N as f64) / 1e9);
+        eprintln!("disperse {disperse_s:.1}s   reconstruct {reconstruct_s:.1}s   root {}",
+                  &root[..16]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

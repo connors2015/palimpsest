@@ -328,6 +328,9 @@ pub struct Node {
     /// consecutive deltas dropped as stale — a slow trainer mining for nothing.
     /// Surfaced in /status + /metrics so the failure is visible, not silent.
     pub stale_deltas: u64,
+    /// per-peer rotation cursor for serving GENESIS shards one at a time, so a
+    /// bootstrapping peer that keeps asking us collects K distinct shards.
+    pub genesis_shard_cursor: HashMap<PeerId, usize>,
 }
 
 impl Node {
@@ -1476,12 +1479,36 @@ pub async fn run(
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Shards(
-                        request_response::Event::Message { message, .. })) => {
+                        request_response::Event::Message { message, peer, .. })) => {
                     match message {
                         // serve whatever shards we hold for the requested bodies
                         request_response::Message::Request { request, channel, .. } => {
                             let mut bodies = Vec::new();
                             for txid in request.txids.iter().take(128) {
+                                // The GENESIS shard set is ~2GB (48 x ~43MB), so
+                                // it can never be served the way a delta body is.
+                                // Return exactly ONE shard per response, and walk
+                                // a per-peer cursor so a requester asking
+                                // repeatedly collects K DISTINCT shards from us
+                                // (the request carries no "shards I already have"
+                                // list, so the server drives the rotation).
+                                if txid == crate::store::Store::GENESIS_DA_KEY {
+                                    let Some((k, n, orig_len)) = node.store.shard_meta(txid)
+                                        else { continue };
+                                    let have = node.store.list_shard_indices(txid);
+                                    if have.is_empty() {
+                                        continue;
+                                    }
+                                    let cur = node.genesis_shard_cursor.entry(peer).or_insert(0);
+                                    let pick = have[*cur % have.len()];
+                                    *cur = cur.wrapping_add(1);
+                                    if let Some(d) = node.store.read_shard(txid, pick) {
+                                        bodies.push(BodyShards {
+                                            txid: txid.clone(), k: k as u32, n: n as u32,
+                                            orig_len, shards: vec![(pick, b64(&d))] });
+                                    }
+                                    continue;
+                                }
                                 if let Some((k, n, orig_len)) = node.store.shard_meta(txid) {
                                     let shards: Vec<(u32, String)> = node.store.list_shards(txid)
                                         .into_iter().map(|(i, d)| (i, b64(&d))).collect();
@@ -1506,7 +1533,10 @@ pub async fn run(
                                         got = true;
                                     }
                                 }
-                                if !node.payloads.contains_key(&b.txid) {
+                                // the genesis key is raw weights, not a Payload —
+                                // reconstructing it is the bootstrap path's job
+                                if b.txid != crate::store::Store::GENESIS_DA_KEY
+                                    && !node.payloads.contains_key(&b.txid) {
                                     if let Some(p) = node.store.reconstruct_payload(&b.txid) {
                                         node.payloads.insert(b.txid.clone(), p);
                                     }

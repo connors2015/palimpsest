@@ -11,11 +11,11 @@ uv run --with torch --with numpy --with pynacl python -m client.make_genesis \
     --model toy --seed 1337 --out /tmp/devnet_genesis.bin
 $B --network local --data-dir /tmp/devnet0 --key-seed $(printf 'a%.0s' {1..64} | head -c 64) \
    --genesis-file /tmp/devnet_genesis.bin --port 7900 --api-port 8190 \
-   --bridge-port 7999 --produce --interval 6 --rotate 2,0 --seconds $S \
+   --bridge-port 7999 --produce --data-refs genesis --interval 6 --rotate 2,0 --seconds $S \
    --data-contributor $FOUNDER > /tmp/devnet0.log 2>&1 &
 $B --network local --data-dir /tmp/devnet1 --key-seed $(printf 'b%.0s' {1..64} | head -c 64) \
    --genesis-file /tmp/devnet_genesis.bin --port 7901 --api-port 8191 \
-   --bridge-port 7998 --produce --interval 6 --rotate 2,1 --seconds $S \
+   --bridge-port 7998 --produce --data-refs genesis --interval 6 --rotate 2,1 --seconds $S \
    --peers /ip4/127.0.0.1/udp/7900/quic-v1 \
    --data-contributor $FOUNDER > /tmp/devnet1.log 2>&1 &
 sleep 3
@@ -27,8 +27,17 @@ wait %1 %2 || true
 kill %3 %4 2>/dev/null || true
 L0=$(grep LINEAGE /tmp/devnet0.log); L1=$(grep LINEAGE /tmp/devnet1.log)
 echo "$L0"; echo "$L1"
-if [ -n "$L0" ] && [ "$L0" = "$L1" ]; then
-    echo "DEVNET CONVERGED ✓"
+# The lineage AFTER the label must be non-empty. Two nodes that produced NO
+# blocks both print an empty lineage; those compare equal, so the old check
+# reported CONVERGED on a chain that never advanced (exactly what happened when
+# rev-5 provenance started filtering every delta for want of --data-refs).
+B0=$(printf '%s' "$L0" | sed 's/.*LINEAGE[: ]*//' | tr -d '[:space:]')
+B1=$(printf '%s' "$L1" | sed 's/.*LINEAGE[: ]*//' | tr -d '[:space:]')
+if [ -z "$B0" ]; then
+    echo "DEVNET PRODUCED NO BLOCKS ✗ (empty lineage — see /tmp/devnet0.log)"; exit 1
+fi
+if [ "$B0" = "$B1" ]; then
+    echo "DEVNET CONVERGED ✓ ($(printf '%s' "$B0" | awk -F'>' '{print NF}') blocks)"
 else
     echo "DEVNET DIVERGED ✗"; exit 1
 fi

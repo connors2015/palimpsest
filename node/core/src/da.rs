@@ -107,33 +107,93 @@ fn mat_inv(m: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
 }
 
 /// One output row = XOR_r ( coeffs[r] · byte_rows[r] ), over GF(256).
-fn gf_combine(coeffs: &[u8], byte_rows: &[Vec<u8>]) -> Vec<u8> {
+///
+/// The inner loop is the hot spot of the whole DA layer (dispersing the ~650MB
+/// genesis is n×orig_len = tens of GB of field multiplies), so instead of a
+/// per-byte `gf_mul` — two table lookups plus a zero-branch — we precompute the
+/// 256-entry table c·x ONCE per coefficient and reduce the inner loop to a
+/// single indexed load. Identical results by construction: tbl[x] == gf_mul(c,x)
+/// for every x, including tbl[0] == 0.
+fn combine_rows(coeffs: &[u8], byte_rows: &[&[u8]]) -> Vec<u8> {
     let len = byte_rows[0].len();
     let mut acc = vec![0u8; len];
+    let g = gf();
     for (&c, row) in coeffs.iter().zip(byte_rows) {
-        if c != 0 {
-            for (a, &r) in acc.iter_mut().zip(row) {
-                *a ^= gf_mul(c, r);
-            }
+        if c == 0 {
+            continue;
+        }
+        let lc = g.log[c as usize] as usize;
+        let mut tbl = [0u8; 256];
+        for (x, t) in tbl.iter_mut().enumerate().skip(1) {
+            *t = g.exp[lc + g.log[x] as usize];
+        }
+        for (a, &r) in acc.iter_mut().zip(row.iter()) {
+            *a ^= tbl[r as usize];
         }
     }
     acc
+}
+
+fn gf_combine(coeffs: &[u8], byte_rows: &[Vec<u8>]) -> Vec<u8> {
+    let rows: Vec<&[u8]> = byte_rows.iter().map(|r| r.as_slice()).collect();
+    combine_rows(coeffs, &rows)
 }
 
 // ---------------------------------------------------------------------------
 // Erasure coding
 // ---------------------------------------------------------------------------
 
+/// Run `f` over the k padded data rows of `body`, borrowing wherever possible.
+/// When k divides the body exactly (the common case) the rows are slices of the
+/// caller's buffer — no copy at all, which matters when the body is the ~650MB
+/// genesis and a naive `to_vec()` per row would triple peak memory.
+fn with_rows<R>(body: &[u8], k: usize, f: impl FnOnce(&[&[u8]]) -> R) -> R {
+    let pad = (k - body.len() % k) % k;
+    if pad == 0 {
+        let l = body.len() / k;
+        let rows: Vec<&[u8]> = (0..k).map(|r| &body[r * l..(r + 1) * l]).collect();
+        f(&rows)
+    } else {
+        let mut data = body.to_vec();
+        data.extend(std::iter::repeat(0u8).take(pad));
+        let l = data.len() / k;
+        let rows: Vec<&[u8]> = (0..k).map(|r| &data[r * l..(r + 1) * l]).collect();
+        f(&rows)
+    }
+}
+
 /// Split `body` into k data rows and expand to n shards (any k reconstruct).
 pub fn encode(body: &[u8], k: usize, n: usize) -> Vec<Vec<u8>> {
     assert!(0 < k && k <= n && n <= 255, "require 0 < k <= n <= 255");
-    let pad = (k - body.len() % k) % k;
-    let mut data = body.to_vec();
-    data.extend(std::iter::repeat(0u8).take(pad));
-    let l = data.len() / k;
-    let rows: Vec<Vec<u8>> = (0..k).map(|r| data[r * l..(r + 1) * l].to_vec()).collect();
     let v = vandermonde(n, k);
-    (0..n).map(|i| gf_combine(&v[i], &rows)).collect()
+    with_rows(body, k, |rows| (0..n).map(|i| combine_rows(&v[i], rows)).collect())
+}
+
+/// Erasure-code + Merkle-commit WITHOUT ever holding all n shards: each shard is
+/// handed to `emit` and then dropped, so peak memory is one shard rather than
+/// the whole n/k-expanded blob. Byte-identical to `disperse(..).shards[i]` and
+/// `disperse(..).root()` — `encode` and this share `with_rows`/`combine_rows`,
+/// and the golden vectors pin both. Returns the Merkle root.
+///
+/// This is what makes dispersing the production genesis feasible: the
+/// all-at-once path needs ~4GB peak for a 650MB body at n=48, this needs ~700MB.
+pub fn disperse_streaming<F>(body: &[u8], k: usize, n: usize, mut emit: F) -> [u8; 32]
+where
+    F: FnMut(usize, &[u8]),
+{
+    assert!(0 < k && k <= n && n <= 255, "require 0 < k <= n <= 255");
+    let v = vandermonde(n, k);
+    let leaves: Vec<[u8; 32]> = with_rows(body, k, |rows| {
+        (0..n)
+            .map(|i| {
+                let shard = combine_rows(&v[i], rows);
+                emit(i, &shard);
+                leaf_hash(&shard)
+            })
+            .collect()
+    });
+    let levels = fold_levels(leaves);
+    levels[levels.len() - 1][0]
 }
 
 /// Recover the body from any k shards ({index: bytes}); None if fewer than k or
@@ -175,11 +235,10 @@ fn node_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     m.finalize().into()
 }
 
-/// Build the tree as levels[0]=leaf hashes .. levels[last]=[root]. An odd node
-/// is promoted (hashed with itself).
-pub fn merkle_build(leaves: &[Vec<u8>]) -> Vec<Vec<[u8; 32]>> {
-    assert!(!leaves.is_empty(), "need at least one leaf");
-    let mut level: Vec<[u8; 32]> = leaves.iter().map(|x| leaf_hash(x)).collect();
+/// Fold precomputed LEAF HASHES up to the root. Shared by `merkle_build` and
+/// `disperse_streaming` so the streaming path cannot drift from the batch one.
+fn fold_levels(mut level: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
+    assert!(!level.is_empty(), "need at least one leaf");
     let mut levels = vec![level.clone()];
     while level.len() > 1 {
         let mut nxt = Vec::with_capacity(level.len().div_ceil(2));
@@ -194,6 +253,12 @@ pub fn merkle_build(leaves: &[Vec<u8>]) -> Vec<Vec<[u8; 32]>> {
         level = nxt;
     }
     levels
+}
+
+/// Build the tree as levels[0]=leaf hashes .. levels[last]=[root]. An odd node
+/// is promoted (hashed with itself).
+pub fn merkle_build(leaves: &[Vec<u8>]) -> Vec<Vec<[u8; 32]>> {
+    fold_levels(leaves.iter().map(|x| leaf_hash(x)).collect())
 }
 
 /// A proof step: sibling on the ('L'eft | 'R'ight) of the path node.
@@ -298,4 +363,41 @@ pub fn sample_available(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    /// The streaming path must be byte-identical to the batch one — it is what
+    /// disperses the production genesis, and a divergence would produce shards
+    /// that reconstruct to a different genesis (or a root nobody else commits to).
+    #[test]
+    fn streaming_matches_batch_dispersal() {
+        for (len, k, n) in [(1usize, 1usize, 1usize), (64, 4, 12), (1000, 16, 48),
+                            (4096, 16, 48), (4097, 8, 10)] {
+            let body: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+            let batch = disperse(&body, k, n);
+            let mut streamed: Vec<Vec<u8>> = vec![Vec::new(); n];
+            let root = disperse_streaming(&body, k, n, |i, sh| streamed[i] = sh.to_vec());
+            assert_eq!(root, batch.root(), "root mismatch (len={len} k={k} n={n})");
+            assert_eq!(streamed, batch.shards, "shards mismatch (len={len} k={k} n={n})");
+        }
+    }
+
+    /// And the streamed shards must actually reconstruct the original body from
+    /// any K of them — the property the whole DA layer rests on.
+    #[test]
+    fn streamed_shards_reconstruct_from_any_k() {
+        let (k, n, len) = (16usize, 48usize, 5000usize);
+        let body: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let mut shards: std::collections::BTreeMap<usize, Vec<u8>> = Default::default();
+        disperse_streaming(&body, k, n, |i, sh| { shards.insert(i, sh.to_vec()); });
+        // keep an arbitrary, non-contiguous K of the N
+        let keep: Vec<usize> = (0..n).step_by(3).take(k).collect();
+        let subset: std::collections::BTreeMap<usize, Vec<u8>> =
+            keep.iter().map(|i| (*i, shards[i].clone())).collect();
+        assert_eq!(subset.len(), k);
+        assert_eq!(reconstruct(&subset, k, len).as_deref(), Some(&body[..]));
+    }
 }

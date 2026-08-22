@@ -266,6 +266,7 @@ fn load_identity(args: &Args) -> [u8; 32] {
 async fn resolve_genesis(args: &Args, store: &store::Store,
                          swarm: &mut libp2p::Swarm<node::Behaviour>) -> Vec<i64> {
     if let Some(g) = store.read_genesis() {
+        ensure_genesis_dispersed(store, &g);
         return g; // durable once written
     }
     let g: Vec<i64> = if !args.genesis_file.is_empty() {
@@ -275,7 +276,15 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
         (0..args.toy_dim as i64).map(|i| i * 100).collect()
     } else if !args.genesis_hash.is_empty() {
         info!(id = %args.genesis_hash, "no local genesis — fetching it from the network");
-        match fetch_genesis(swarm, &args.genesis_hash, &args.peers).await {
+        // DA shards first: the only path that works at production scale, since
+        // shards are fetched individually and never hit the sync response cap.
+        // Falls back to the whole-genesis sync fetch (fine for toy/small chains).
+        let fetched = match fetch_genesis_shards(swarm, store, &args.peers,
+                                                 &args.genesis_hash).await {
+            Some(g) => Some(g),
+            None => fetch_genesis(swarm, &args.genesis_hash, &args.peers).await,
+        };
+        match fetched {
             Some(g) => g,
             // Peer-fetch only works for genesis vectors that fit the sync
             // response cap. The production model is ~650MB raw, far over it, so
@@ -283,11 +292,12 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
             // at a 3-minute hang and a bare panic. The genesis is DETERMINISTIC,
             // so generating it locally is both faster and trustless.
             None => panic!("{}", [
-                "could not fetch a genesis matching --genesis-hash from any peer.",
+                "could not obtain a genesis matching --genesis-hash from any peer",
+                "(tried DA-shard reconstruction, then a whole-genesis fetch).",
                 "",
-                "For the production model this is expected: the genesis (~650MB) is",
-                "far larger than the sync transport can carry. Generate it locally —",
-                "it is deterministic, so this is trustless, and faster than a download:",
+                "No peer is serving genesis shards yet, or too few of them are.",
+                "Generate the genesis locally instead — it is deterministic, so this",
+                "is trustless, and usually faster than fetching it:",
                 "",
                 "  uv run --with torch --with numpy --with pynacl \\",
                 "      python -m client.make_genesis --model small --seed 1337 --out genesis.bin",
@@ -320,7 +330,99 @@ async fn resolve_genesis(args: &Args, store: &store::Store,
         info!(params = g.len(), "genesis verified against the network's id");
     }
     store.write_genesis(&g).expect("cannot persist genesis");
+    ensure_genesis_dispersed(store, &g);
     g
+}
+
+/// Erasure-code the genesis into DA shards once, so THIS node can serve it to
+/// joiners. Every node that holds the genesis becomes a source, which is what
+/// removes the single-host download and the local-regeneration requirement.
+///
+/// Costs, for the ~650MB production genesis: a few minutes of GF(256) work and
+/// ~2GB of disk (48 shards x ~43MB, the same 3x redundancy delta bodies use).
+/// One-time and idempotent — subsequent boots see the metadata and skip.
+fn ensure_genesis_dispersed(store: &store::Store, g: &[i64]) {
+    if store.shard_meta(store::Store::GENESIS_DA_KEY).is_some() {
+        return; // already dispersed
+    }
+    let bytes = g.len() * 8;
+    info!(params = g.len(), mb = bytes / (1 << 20),
+          "dispersing the genesis into DA shards so peers can bootstrap from us \
+           (one-time; this takes a while for a large model)");
+    let t0 = std::time::Instant::now();
+    match store.disperse_genesis(g) {
+        Some(root) => info!(root = %&root[..16], secs = t0.elapsed().as_secs(),
+                            "genesis dispersed"),
+        None => warn!("could not disperse the genesis — this node will not be \
+                       able to serve it to joiners"),
+    }
+}
+
+/// Rebuild the genesis from erasure shards gathered across peers. Unlike the
+/// whole-genesis sync fetch this has no size ceiling: each shard is its own
+/// response, so a ~650MB genesis arrives as 16 x ~43MB pieces. Verifies the
+/// result against the published id before adopting it, so a hostile peer can
+/// at worst waste our time, never seed us a different chain.
+async fn fetch_genesis_shards(swarm: &mut libp2p::Swarm<node::Behaviour>,
+                              store: &store::Store, peers: &str,
+                              expected_hash: &str) -> Option<Vec<i64>> {
+    use futures::StreamExt;
+    use libp2p::{request_response, swarm::SwarmEvent};
+    let key = store::Store::GENESIS_DA_KEY.to_string();
+    let start = std::time::Instant::now();
+    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let connected: Vec<_> = swarm.connected_peers().copied().collect();
+                if connected.is_empty() {
+                    node::dial_peers(swarm, peers);
+                }
+                for p in connected {
+                    swarm.behaviour_mut().shards.send_request(
+                        &p, proto::ShardRequest { txids: vec![key.clone()] });
+                }
+                if start.elapsed().as_secs() > 180 {
+                    return None;
+                }
+            }
+            ev = swarm.select_next_some() => {
+                if let SwarmEvent::Behaviour(node::BehaviourEvent::Shards(
+                    request_response::Event::Message {
+                        message: request_response::Message::Response { response, .. },
+                        peer, .. })) = ev
+                {
+                    let mut got = false;
+                    for b in response.bodies.iter().filter(|b| b.txid == key) {
+                        for (i, data) in &b.shards {
+                            if let Some(bytes) = proto::unb64(data) {
+                                store.put_shard(&key, *i, &bytes,
+                                                b.k as usize, b.n as usize, b.orig_len);
+                                got = true;
+                            }
+                        }
+                    }
+                    if got {
+                        if let Some(g) = store.reconstruct_genesis() {
+                            if core::state_root(&g) == expected_hash
+                                || core::blocktree::genesis_block_hash(&g) == expected_hash {
+                                info!(params = g.len(),
+                                      "genesis reconstructed from DA shards");
+                                return Some(g);
+                            }
+                            warn!("genesis reconstructed from shards does NOT match \
+                                   the published id — discarding");
+                            return None;
+                        }
+                        // not enough shards yet — ask this peer again immediately
+                        // (its cursor advances, so we get a different shard)
+                        swarm.behaviour_mut().shards.send_request(
+                            &peer, proto::ShardRequest { txids: vec![key.clone()] });
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Fetch the genesis weights from a peer and verify they hash to the expected
@@ -647,6 +749,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chat_pending: Vec::new(),
         chat_inflight: false,
         stale_deltas: 0,
+        genesis_shard_cursor: Default::default(),
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;
     Ok(())
