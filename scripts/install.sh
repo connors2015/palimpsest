@@ -65,12 +65,37 @@ else
   echo "BACK THIS FILE UP — it is your identity and your balance."
 fi
 
-say "genesis (reproduced locally — deterministic, so this is trustless)"
+say "genesis"
 GEN="$HOME_DIR/genesis.bin"
 if [ -f "$GEN" ]; then
   echo "using existing $GEN"
+elif [ -n "${PALIMPSEST_GENESIS_URL:-}" ]; then
+  # Convenience path: a prebuilt artifact (scripts/release-genesis.sh). Trust is
+  # NOT implied — the node verifies the weights against the state_root compiled
+  # into the binary, so a tampered download fails at startup.
+  echo "downloading prebuilt genesis: $PALIMPSEST_GENESIS_URL"
+  TMP="$HOME_DIR/.genesis.download"
+  curl -fL --progress-bar "$PALIMPSEST_GENESIS_URL" -o "$TMP"
+  # verify the bytes AS DOWNLOADED (that is what the manifest publishes for the
+  # artifact) — before spending time decompressing something tampered with
+  if [ -n "${PALIMPSEST_GENESIS_SHA256:-}" ]; then
+    GOT=$(shasum -a 256 "$TMP" | awk '{print $1}')
+    [ "$GOT" = "$PALIMPSEST_GENESIS_SHA256" ] || {
+      echo "FATAL: downloaded artifact sha256 mismatch"
+      echo "  want $PALIMPSEST_GENESIS_SHA256"; echo "  got  $GOT"
+      rm -f "$TMP"; exit 1; }
+    echo "artifact sha256 verified."
+  fi
+  case "$PALIMPSEST_GENESIS_URL" in
+    *.zst) command -v zstd >/dev/null || { echo "need zstd to decompress"; exit 1; }
+           zstd -d -q -f "$TMP" -o "$GEN"; rm -f "$TMP" ;;
+    *)     mv "$TMP" "$GEN" ;;
+  esac
+  echo "(the node also verifies it against the network's baked-in state_root)"
 else
-  [ -n "$UV" ] || { echo "need python+torch to generate the genesis"; exit 1; }
+  [ -n "$UV" ] || { echo "need python+torch to generate the genesis, or set \
+PALIMPSEST_GENESIS_URL to a prebuilt artifact"; exit 1; }
+  echo "reproducing it locally — deterministic, so this is trustless"
   ( cd "$REPO" && $UV -m client.make_genesis \
       --model "$MODEL" --seed "$GENESIS_SEED" --out "$GEN" ) | tee "$HOME_DIR/genesis.log"
   if ! grep -q "$GENESIS_ID" "$HOME_DIR/genesis.log"; then
