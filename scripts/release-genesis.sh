@@ -17,9 +17,9 @@
 # erasure-coded DA shards, so the download is not the only path.
 set -euo pipefail
 
-MODEL="${PALIMPSEST_MODEL:-small}"
-SEED="${PALIMPSEST_GENESIS_SEED:-1337}"
-EXPECT="${PALIMPSEST_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
+MODEL="${SESTRIAN_MODEL:-small}"
+SEED="${SESTRIAN_GENESIS_SEED:-1337}"
+EXPECT="${SESTRIAN_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
 OUT="${1:-dist}"
 
 cd "$(dirname "$0")/.."
@@ -66,7 +66,7 @@ fi
 say "manifest"
 cat > "$OUT/genesis-manifest.json" <<JSON
 {
-  "network": "${PALIMPSEST_NETWORK:-devnet}",
+  "network": "${SESTRIAN_NETWORK:-devnet}",
   "model": "$MODEL",
   "seed": $SEED,
   "params": $((RAW_SIZE / 8)),
@@ -84,5 +84,5 @@ rm -f "$OUT/.genesis.log"
 cat "$OUT/genesis-manifest.json"
 say "done — publish $OUT/ as release assets"
 echo "  testers then either:"
-echo "    PALIMPSEST_GENESIS_URL=<url-to-genesis.bin.zst> scripts/install.sh"
+echo "    SESTRIAN_GENESIS_URL=<url-to-genesis.bin.zst> scripts/install.sh"
 echo "  or regenerate it themselves (identical bytes, no trust needed)."

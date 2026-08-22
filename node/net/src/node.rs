@@ -15,7 +15,7 @@ use libp2p::{
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     Multiaddr, PeerId, StreamProtocol, Swarm,
 };
-use palimpsest_core::{self as core, blocktree::BlockTree, token::AccountTx};
+use sestrian_core::{self as core, blocktree::BlockTree, token::AccountTx};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -240,16 +240,16 @@ pub fn behaviour(
     Behaviour {
         gossipsub,
         identify: identify::Behaviour::new(identify::Config::new(
-            "/palimpsest/1.0.0".into(), key.public())),
+            "/sestrian/1.0.0".into(), key.public())),
         sync: request_response::Behaviour::with_codec(
             JsonCodec::new(SYNC_REQ_MAX, SYNC_RESP_MAX),
-            [(StreamProtocol::new("/palimpsest/sync/1"), ProtocolSupport::Full)],
+            [(StreamProtocol::new("/sestrian/sync/1"), ProtocolSupport::Full)],
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(300)),
         ),
         shards: request_response::Behaviour::with_codec(
             JsonCodec::new(SHARD_REQ_MAX, SHARD_RESP_MAX),
-            [(StreamProtocol::new("/palimpsest/shards/1"), ProtocolSupport::Full)],
+            [(StreamProtocol::new("/sestrian/shards/1"), ProtocolSupport::Full)],
             request_response::Config::default()
                 .with_request_timeout(Duration::from_secs(120)),
         ),
@@ -425,7 +425,7 @@ impl Node {
     /// (can never apply), then cap by dropping the most speculative (highest
     /// nonce) first.
     fn evict_account_pool(&mut self) {
-        use palimpsest_core::token::address;
+        use sestrian_core::token::address;
         let stale: Vec<String> = {
             let led = self.tree.head_ledger();
             self.account_pool.iter()
@@ -486,7 +486,7 @@ impl Node {
     }
 
     fn accept_account_tx(&mut self, tx: AccountTx) -> Option<String> {
-        use palimpsest_core::token::address;
+        use sestrian_core::token::address;
         let txid = tx.txid();
         if self.seen.contains(&txid) || !tx.verify() {
             return None;
@@ -504,7 +504,7 @@ impl Node {
     }
 
     // ---- block production ------------------------------------------------
-    fn build_candidate(&self) -> Option<(StoredBlock, palimpsest_core::blocktree::Block)> {
+    fn build_candidate(&self) -> Option<(StoredBlock, sestrian_core::blocktree::Block)> {
         let head = self.tree.head.clone();
         let hh = self.head_height();
         // rev 5: a delta that names no staked/active corpus would invalidate the
@@ -635,7 +635,7 @@ impl Node {
         let mut transfers = Vec::new();
         let mut data_txs = Vec::new();
         let pool: Vec<AccountTx> = self.account_pool.values().cloned().collect();
-        for t in palimpsest_core::token::canonical_account_txs(&pool) {
+        for t in sestrian_core::token::canonical_account_txs(&pool) {
             let ok = match &t {
                 AccountTx::Transfer(x) => scratch.apply_transfer(x),
                 _ => scratch.apply_data_tx(&t, hh + 1, &jurors),
@@ -667,9 +667,9 @@ impl Node {
             n_txs: chosen.len() as u64,
             work: core::lottery::vrf_work(&vrf_proof),
             proposer: self.key.pub_hex(),
-            transfer_root: palimpsest_core::token::transfer_root(&core_transfers),
+            transfer_root: sestrian_core::token::transfer_root(&core_transfers),
             ledger_root: scratch.root(),
-            data_root: palimpsest_core::token::data_root(&core_data),
+            data_root: sestrian_core::token::data_root(&core_data),
             vrf_proof: hex::encode(&vrf_proof),
             score_root: core::blocktree::scores_root(&blk_scores),
             sketch_root: core::blocktree::sketch_root(&blk_sketches),
@@ -686,7 +686,7 @@ impl Node {
         for t in chosen.iter() {
             bodies.insert(t.da_pointer.clone(), self.payloads[&t.txid()].dense().unwrap());
         }
-        let block = palimpsest_core::blocktree::Block {
+        let block = sestrian_core::blocktree::Block {
             header, txs: chosen, bodies,
             transfers: core_transfers, data_txs: core_data,
             scores: blk_scores, sketches: blk_sketches,
@@ -935,8 +935,8 @@ impl Node {
     fn api_metrics(&self) -> String {
         let led = self.tree.head_ledger();
         let g = |help: &str, name: &str, v: u64| {
-            format!("# HELP palimpsest_{name} {help}\n# TYPE palimpsest_{name} gauge\n\
-                     palimpsest_{name} {v}\n")
+            format!("# HELP sestrian_{name} {help}\n# TYPE sestrian_{name} gauge\n\
+                     sestrian_{name} {v}\n")
         };
         [
             g("chain head height", "height", self.head_height()),
@@ -978,7 +978,7 @@ impl Node {
     fn api_miners(&self) -> Value {
         // work accounting straight from chain history: for every miner ever
         // seen, blocks proposed, deltas contributed, tokens earned, last height
-        use palimpsest_core::token::address;
+        use sestrian_core::token::address;
         let mut stats: HashMap<String, (u64, u64, u64)> = HashMap::new(); // pub -> (proposed, deltas, last_h)
         for sb in self.blocks_full.values() {
             let h = sb.header.height;
@@ -1013,7 +1013,7 @@ impl Node {
     }
 
     fn api_upload(&mut self, bytes: Vec<u8>, stake: u64, media: String) -> (Value, Option<Gossip>) {
-        use palimpsest_core::token::{address, AccountTx, DataSubmitTx};
+        use sestrian_core::token::{address, AccountTx, DataSubmitTx};
         if bytes.is_empty() {
             return (json!({"ok": false, "error": "empty file"}), None);
         }

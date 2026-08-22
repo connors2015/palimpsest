@@ -141,7 +141,7 @@ class IntegratedChain:
         return True
 
 
-def new_chain(n=5, t=3, seed=0, dkg_seed=b"palimpsest-int"):
+def new_chain(n=5, t=3, seed=0, dkg_seed=b"sestrian-int"):
     keys = run_dkg(n, t, dkg_seed)
     w0 = quantize(MODEL.init(np.random.default_rng(seed)))
     return IntegratedChain(keys=keys, n=n, w_int=w0.copy(), genesis_int=w0.copy())
@@ -150,7 +150,7 @@ def new_chain(n=5, t=3, seed=0, dkg_seed=b"palimpsest-int"):
 if __name__ == "__main__":
     import time
     print("=" * 72)
-    print("  PALIMPSEST — integrated node (beacon + DA + leader election, live)")
+    print("  SESTRIAN — integrated node (beacon + DA + leader election, live)")
     print("=" * 72)
     chain = new_chain(n=5, t=3)
     print(f"\n5 nodes, 3-of-5 DKG beacon. Each block: beacon → leader + shards,")

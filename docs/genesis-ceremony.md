@@ -1,6 +1,6 @@
 # The Genesis Ceremony
 
-How the real Palimpsest network is born. Everything here is decided, published,
+How the real Sestrian network is born. Everything here is decided, published,
 and verifiable **before** block 1 exists — credibility is set at launch and
 cannot be retrofitted (WHITEPAPER §9.8). This document is the checklist and the
 script; each item names the mechanism that already implements it.
@@ -44,7 +44,7 @@ A single JSON document, hashed and pinned, containing:
 
 ## 2. Seed derivation — nobody chooses the genesis weights
 
-`genesis_seed = sha256("palimpsest-genesis" || drand_round_R_signature)` where
+`genesis_seed = sha256("sestrian-genesis" || drand_round_R_signature)` where
 `R` is a **pre-announced future round** of the drand public randomness beacon
 (the League of Entropy). Because `R` is announced before its value exists,
 neither the team nor anyone else can grind the initialization. Anyone can

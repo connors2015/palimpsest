@@ -57,7 +57,7 @@ fn authorized(api: &Api, headers: &HeaderMap) -> bool {
 fn forbidden() -> Json<Value> {
     Json(json!({"ok": false,
         "error": "unauthorized: this endpoint requires the operator's \
-                  Authorization: Bearer token (set PALIMPSEST_API_TOKEN)"}))
+                  Authorization: Bearer token (set SESTRIAN_API_TOKEN)"}))
 }
 
 async fn ask(tx: &mpsc::Sender<ApiCmd>, make: impl FnOnce(oneshot::Sender<Value>) -> ApiCmd)
@@ -187,14 +187,14 @@ pub async fn run(bind: String, port: u16, admin_token: Option<String>,
         }
     };
     info!("http api on {bind}:{port} (admin endpoints {})",
-          if guarded { "token-gated" } else { "DISABLED — set PALIMPSEST_API_TOKEN" });
+          if guarded { "token-gated" } else { "DISABLED — set SESTRIAN_API_TOKEN" });
     let _ = axum::serve(listener, app).await;
 }
 
 /// The always-on chain dashboard, served by the node itself at `/`.
 const PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>palimpsest &middot; chain</title>
+<title>sestrian &middot; chain</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#129504;</text></svg>">
 <style>
 :root{--bg:#0a0d12;--s:#111721;--s2:#0d1219;--ink:#dbe4ee;--mut:#6d7f92;--line:#1d2836;
@@ -248,7 +248,7 @@ button:disabled{opacity:.5}
 select{background:var(--s2);border:1px solid var(--line);border-radius:9px;color:var(--ink);
 font-family:var(--mono);padding:10px}
 </style></head><body><div class="wrap">
-<header><h1><span id="dot"></span><b>palimpsest</b> chain</h1>
+<header><h1><span id="dot"></span><b>sestrian</b> chain</h1>
 <div id="sub">connecting&hellip;</div></header>
 <div class="grid">
  <div class="stat"><div class="k">height</div><div class="v" id="height">&ndash;</div></div>
@@ -275,7 +275,7 @@ on right now, stamped with their block. on a CPU-only seed a reply can take a mi
  <input type="file" id="file">
  <select id="media"><option>text</option><option>csv</option><option>code</option>
  <option>image</option><option>other</option></select>
- <input type="number" id="stake" value="1" min="0.1" step="0.1" title="stake (PALIMPSEST)">
+ <input type="number" id="stake" value="1" min="0.1" step="0.1" title="stake (SESTRIAN)">
  <button id="up">upload + stake</button>
 </div>
 <div class="note" id="upnote">the node stores the bytes (content-addressed) and submits a

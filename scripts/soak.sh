@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 ( cd node && cargo build --release )
-B=node/target/release/palimpsest-node
+B=node/target/release/sestrian-node
 S=${1:-90}
 KILL_AT=${2:-35}
 FOUNDER=${FOUNDER:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}
@@ -54,7 +54,7 @@ grep -q "FAST-BOOT\|full validated replay" /tmp/soak0.log && echo ">>> node0 boo
 wait "$N0" "$N1" 2>/dev/null || true
 pkill -f miner_bridge 2>/dev/null || true
 
-echo "=== node0 boot lines ==="; grep -E "FAST-BOOT|full validated replay|another palimpsest" /tmp/soak0.log | tail -3
+echo "=== node0 boot lines ==="; grep -E "FAST-BOOT|full validated replay|another sestrian" /tmp/soak0.log | tail -3
 L0=$(grep LINEAGE /tmp/soak0.log | tail -1); L1=$(grep LINEAGE /tmp/soak1.log | tail -1)
 echo "node0: $L0"; echo "node1: $L1"
 if [ -n "$L0" ] && [ "$L0" = "$L1" ]; then

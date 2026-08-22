@@ -1,4 +1,4 @@
-<title>Palimpsest — technical brief</title>
+<title>Sestrian — technical brief</title>
 <style>
   :root{
     --ground:#e7e6df; --surface:#efeee8; --surface2:#f5f4ef;
@@ -90,7 +90,7 @@
 </style>
 
 <header><div class="wrap mast">
-  <span class="brand">Palimpsest</span><span class="tag">Technical brief · confidential</span>
+  <span class="brand">Sestrian</span><span class="tag">Technical brief · confidential</span>
   <span class="spacer"></span><button class="toggle" id="tg">Theme</button>
 </div></header>
 
@@ -111,7 +111,7 @@
   <section>
     <h2>1 · Thesis</h2>
     <p>Every decentralized-AI network keeps its incentive layer on-chain and its
-      model in someone's storage bucket. Palimpsest inverts that: <strong>the
+      model in someone's storage bucket. Sestrian inverts that: <strong>the
       model's weights are the chain state.</strong> A block is one optimizer step;
       a transaction is a signed gradient update; the block header commits a Merkle
       root over the weights; replaying the chain reconstructs the model bit-for-bit.
@@ -172,7 +172,7 @@
     <p>The hard cryptographic and networking pieces are not hand-waved. Each maps
       to an established design and runs in the rig.</p>
     <div class="tbl"><table>
-      <thead><tr><th>Prior art</th><th>Palimpsest</th><th>Module</th></tr></thead>
+      <thead><tr><th>Prior art</th><th>Sestrian</th><th>Module</th></tr></thead>
       <tbody>
         <tr><td>Bitcoin signed transactions</td><td>Ed25519-signed delta commitments</td><td class="mono">crypto, ed25519</td></tr>
         <tr><td>Bitcoin headers + longest chain</td><td>Hash-linked headers, heaviest-valid-chain fork choice</td><td class="mono">blockchain</td></tr>
@@ -256,14 +256,14 @@
 </div>
 
 <footer><div class="wrap">
-  PALIMPSEST · technical brief · confidential pre-seed
+  SESTRIAN · technical brief · confidential pre-seed
   <div class="d">Figures describe a toy-scale reference implementation and modeled
     economics, not a live network, revenue, or committed customers. Forward-looking;
     nothing here is an offer of securities.</div>
 </div></footer>
 
 <script>
-  (function(){var r=document.documentElement,k="palimpsest-theme";
+  (function(){var r=document.documentElement,k="sestrian-theme";
   try{var s=localStorage.getItem(k);if(s)r.setAttribute("data-theme",s);}catch(e){}
   document.getElementById("tg").onclick=function(){
     var c=r.getAttribute("data-theme");

@@ -30,11 +30,11 @@ from py_ecc.bls.hash_to_curve import hash_to_G2
 from py_ecc.optimized_bls12_381 import (G1, add, curve_order, multiply, neg,
                                         normalize, pairing)
 
-DST = b"PALIMPSEST-BEACON-BLS12381-SHA256"
+DST = b"SESTRIAN-BEACON-BLS12381-SHA256"
 
 
 def _round_point(r: int):
-    return hash_to_G2(f"palimpsest-beacon|{r}".encode(), DST, hashlib.sha256)
+    return hash_to_G2(f"sestrian-beacon|{r}".encode(), DST, hashlib.sha256)
 
 
 def _lagrange_at_zero(indices: list[int]) -> dict[int, int]:
@@ -61,7 +61,7 @@ class BeaconKeys:
     n: int
 
 
-def deal(n: int, t: int, seed: bytes = b"palimpsest-dealer") -> BeaconKeys:
+def deal(n: int, t: int, seed: bytes = b"sestrian-dealer") -> BeaconKeys:
     """Trusted-dealer Shamir setup: sample a degree-(t-1) polynomial f, the group
     secret is f(0); share_i = f(i). (Production replaces this with DKG.)"""
     rng = np.random.default_rng(int.from_bytes(hashlib.sha256(seed).digest()[:8], "big"))
@@ -133,7 +133,7 @@ def produce(keys: BeaconKeys, r: int, signer_indices: list[int]):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("  PALIMPSEST — unbiasable randomness beacon (threshold BLS)")
+    print("  SESTRIAN — unbiasable randomness beacon (threshold BLS)")
     print("=" * 70)
     n, t = 5, 3
     keys = deal(n, t)

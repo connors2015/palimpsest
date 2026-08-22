@@ -249,7 +249,7 @@ def verify_serve(moe: MoE, available_pages: dict, receipt: dict,
 
 if __name__ == "__main__":
     print("=" * 68)
-    print("  PALIMPSEST — sparse MoE with page-attested inference")
+    print("  SESTRIAN — sparse MoE with page-attested inference")
     print("=" * 68)
     rng = np.random.default_rng(0)
     cfg = MoEConfig(n_experts=8, top_k=1)

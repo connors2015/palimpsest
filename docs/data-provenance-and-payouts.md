@@ -1,6 +1,6 @@
 # Data Provenance & Payouts (protocol rev 5)
 
-The rule that makes Palimpsest a market for *data*, not just compute. It has one
+The rule that makes Sestrian a market for *data*, not just compute. It has one
 invariant and two payment moments. This is the reference the rig implements and
 the Rust node mirrors bit-for-bit.
 

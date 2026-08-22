@@ -1,15 +1,15 @@
 [package]
-name = "palimpsest-node"
+name = "sestrian-node"
 version = "0.3.0"
 edition = "2021"
-description = "The production Palimpsest node: libp2p networking (NAT-traversing), PyTorch training bridge, persistence, HTTP API — over the bit-exact consensus core"
+description = "The production Sestrian node: libp2p networking (NAT-traversing), PyTorch training bridge, persistence, HTTP API — over the bit-exact consensus core"
 
 [[bin]]
-name = "palimpsest-node"
+name = "sestrian-node"
 path = "src/main.rs"
 
 [dependencies]
-palimpsest-core = { path = "../core" }
+sestrian-core = { path = "../core" }
 libp2p = { version = "0.55", features = [
     "tokio", "gossipsub", "noise", "yamux", "tcp", "quic", "identify",
     "macros", "ed25519", "request-response", "json", "autonat", "dcutr",

@@ -1,4 +1,4 @@
-# Palimpsest
+# Sestrian
 
 **A blockchain whose state is the weights of a single public neural network.**
 
@@ -51,12 +51,12 @@ uv run --with torch --with numpy --with pynacl \
     python -m client.make_genesis --model small --seed 1337 --out genesis.bin
 
 # check you can actually contribute BEFORE committing hours to it
-node/target/release/palimpsest-node --check \
-  --data-dir ~/.palimpsest --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin
+node/target/release/sestrian-node --check \
+  --data-dir ~/.sestrian --wallet ~/.sestrian/wallet.json --genesis-file genesis.bin
 
 # then run it
-node/target/release/palimpsest-node \
-  --data-dir ~/.palimpsest --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin
+node/target/release/sestrian-node \
+  --data-dir ~/.sestrian --wallet ~/.sestrian/wallet.json --genesis-file genesis.bin
 ```
 
 There are no chain parameters to get right: like Bitcoin's `-testnet`, the
@@ -96,7 +96,7 @@ bridge. The trainer pulls head weights, trains on your corpus, and hands back
 compressed deltas the node gossips:
 
 ```bash
-target/release/palimpsest-node ... --produce --bridge-port 7999
+target/release/sestrian-node ... --produce --bridge-port 7999
 python -m client.miner_bridge --node-port 7999 --model small --data corpus.txt --device cuda
 ```
 
@@ -121,7 +121,7 @@ disinterested-juror quorum votes, and a loser is slashed. Watch the registry wit
 
 > Prefer to push raw bytes through the node instead of just the hash? `POST
 > /upload` takes the file, stakes from the node's own wallet, and stores it in the
-> content-addressed DA layer. It requires `PALIMPSEST_API_TOKEN` (Bearer) and a
+> content-addressed DA layer. It requires `SESTRIAN_API_TOKEN` (Bearer) and a
 > funded node wallet — see [docs/joining.md](docs/joining.md).
 
 ### Serve the API (answer inference, earn fees)
@@ -145,7 +145,7 @@ python -m client.miner_bridge --node-port 7999 --model small --serve-only
 # callers: POST http://<you>:8090/inference  { prompt, fee, signature } → answer + on-chain receipt
 ```
 
-Keep mutating endpoints (`/chat`, `/upload`) behind `PALIMPSEST_API_TOKEN`, and
+Keep mutating endpoints (`/chat`, `/upload`) behind `SESTRIAN_API_TOKEN`, and
 don't expose them to the open internet unauthenticated. See the
 [threat model](docs/internal/threat-model.md).
 
@@ -157,7 +157,7 @@ don't expose them to the open internet unauthenticated. See the
 | **[docs/joining.md](docs/joining.md)** | the tester's join guide — the three public things you need and the exact run command |
 | **client/** | the Python client: real PyTorch GPT trained *through the chain*, the wallet CLI, the `watch.py` web UI, DiPaCo sharding, content-addressed storage |
 | **rig/** | the reference implementation — consensus, token ledger + data lane, DA, beacon, economics; the SPEC the Rust node must match |
-| **node/** | the Rust node: `palimpsest-core` (bit-exact consensus, pinned to the reference by golden vectors) + `palimpsest-node` (libp2p GossipSub/QUIC networking) |
+| **node/** | the Rust node: `sestrian-core` (bit-exact consensus, pinned to the reference by golden vectors) + `sestrian-node` (libp2p GossipSub/QUIC networking) |
 | **docs/** | including **[genesis-ceremony.md](docs/genesis-ceremony.md)** — how the real network launches, and **[production-readiness.md](docs/production-readiness.md)** — the go/no-go tracker |
 | **deploy/** | the bootstrap seed node (Kubernetes) |
 

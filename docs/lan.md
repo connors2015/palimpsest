@@ -1,4 +1,4 @@
-# Running Palimpsest across machines
+# Running Sestrian across machines
 
 `rig/lan.py` runs a coordinator and miners on **different physical machines**
 over TCP (the same length-prefixed protocol the local node uses). Rounds are
@@ -27,8 +27,8 @@ assignment mean *where* a miner runs never changes the state.
 Both machines need the repo and numpy. On a fresh miner box:
 
 ```bash
-rsync -az --exclude '.git' --exclude '__pycache__' ./ <host>:~/palimpsest/
-ssh <host> 'cd ~/palimpsest && python3 -m venv .venv && .venv/bin/pip install numpy'
+rsync -az --exclude '.git' --exclude '__pycache__' ./ <host>:~/sestrian/
+ssh <host> 'cd ~/sestrian && python3 -m venv .venv && .venv/bin/pip install numpy'
 ```
 
 On the coordinator machine (binds 0.0.0.0 so remote miners can dial in):

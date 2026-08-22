@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")/.."
 ( cd node && cargo build --release )
-B=node/target/release/palimpsest-node
+B=node/target/release/sestrian-node
 S=${1:-90}
 FOUNDER=${FOUNDER:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}
 rm -rf /tmp/devnet0 /tmp/devnet1

@@ -17,7 +17,7 @@ is the bootstrap budget of the network. It gets spent exactly once.
 
 ## The mission constraint
 
-Palimpsest's miners do **useful work that must continue forever** — perpetual
+Sestrian's miners do **useful work that must continue forever** — perpetual
 public training is the product. Bitcoin can end its subsidy because ledger
 security is cheap relative to fees; a model that must keep learning cannot. This
 is the single place we deliberately *adapt* Bitcoin rather than copy it.

@@ -9,7 +9,7 @@ def main():
     A, B = r["A"], r["B"]
 
     print("=" * 72)
-    print("  PALIMPSEST §12.3 red-team — can a stealthy backdoor beat detection?")
+    print("  SESTRIAN §12.3 red-team — can a stealthy backdoor beat detection?")
     print("=" * 72)
     print(f"\nbase clean accuracy {A['base_clean']:.3f}; honest delta norm "
           f"~{A['honest_norm']:.2f}. A probe 'fires' above: clean>{TH_CLEAN}, "

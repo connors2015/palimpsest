@@ -29,7 +29,7 @@ _TWO256 = 1 << 256
 
 
 def seed(prev_hash: str, height: int) -> bytes:
-    return hashlib.sha256(f"palimpsest-lottery|{prev_hash}|{height}".encode()).digest()
+    return hashlib.sha256(f"sestrian-lottery|{prev_hash}|{height}".encode()).digest()
 
 
 def vrf_prove(key, prev_hash: str, height: int) -> bytes:

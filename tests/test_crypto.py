@@ -6,7 +6,7 @@ from rig.crypto import BackpropTx, Key, delta_hash, verify
 
 def test_sign_verify_roundtrip_and_tamper():
     k = Key.generate(b"seed-a".ljust(32, b"0"))
-    msg = b"palimpsest block 42"
+    msg = b"sestrian block 42"
     sig = k.sign(msg)
     assert verify(k.pub, msg, sig)
     assert not verify(k.pub, b"different message", sig)   # tamper -> invalid

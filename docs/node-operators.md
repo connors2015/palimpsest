@@ -1,6 +1,6 @@
-# Running a Palimpsest Node
+# Running a Sestrian Node
 
-The production node is Rust (`node/` — `palimpsest-node`); training is a
+The production node is Rust (`node/` — `sestrian-node`); training is a
 PyTorch plugin that attaches locally. Consensus and networking never depend on
 Python; training never touches consensus — the two meet only at the compressed,
 signed delta (the consensus boundary, WHITEPAPER §6.3).
@@ -8,7 +8,7 @@ signed delta (the consensus boundary, WHITEPAPER §6.3).
 ## Build
 
 ```bash
-cd node && cargo build --release      # single binary: node/target/release/palimpsest-node
+cd node && cargo build --release      # single binary: node/target/release/sestrian-node
 ```
 
 ## Identity
@@ -17,8 +17,8 @@ Your wallet is your miner identity — rewards mint to its address.
 
 ```bash
 python -m client.wallet new           # encrypted file + 24-word mnemonic + pal1… address
-palimpsest-node --wallet ~/.palimpsest/wallet.json …   # encrypted: set
-export PALIMPSEST_WALLET_PASSPHRASE=…                  # (argon2id + XSalsa20-Poly1305)
+sestrian-node --wallet ~/.sestrian/wallet.json …   # encrypted: set
+export SESTRIAN_WALLET_PASSPHRASE=…                  # (argon2id + XSalsa20-Poly1305)
 ```
 
 Infra nodes (seeds/relays) that never earn can use `--key-seed <32-byte hex>`.
@@ -30,7 +30,7 @@ Every node must load the network's published genesis artifact:
 ```bash
 python -m client.make_genesis --model small --seed <published> --out genesis.bin
 # verify the printed genesis_state_root against the ceremony publication
-palimpsest-node --genesis-file genesis.bin …
+sestrian-node --genesis-file genesis.bin …
 ```
 
 Once loaded it persists in the data dir; the flag is only needed on first run.
@@ -39,9 +39,9 @@ Once loaded it persists in the data dir; the flag is only needed on first run.
 
 ```bash
 # terminal 1 — the node (consensus + networking + API):
-palimpsest-node \
-  --data-dir ~/.palimpsest/node \
-  --wallet ~/.palimpsest/wallet.json \
+sestrian-node \
+  --data-dir ~/.sestrian/node \
+  --wallet ~/.sestrian/wallet.json \
   --genesis-file genesis.bin \
   --port 7900 --api-port 8090 --bridge-port 7999 \
   --produce --interval 60 \
@@ -67,7 +67,7 @@ sync to peers, and answers the API — this is what powers explorers and wallets
 ## A seed / relay node
 
 ```bash
-palimpsest-node --data-dir /var/palimpsest --key-seed <hex> \
+sestrian-node --data-dir /var/sestrian --key-seed <hex> \
   --genesis-file genesis.bin --port 7900 --api-port 8090 \
   --relay-server --external-address /ip4/<public-ip>/udp/7900/quic-v1
 ```
@@ -116,7 +116,7 @@ bodies should be retained on more than one anchor so losing one never loses a
 body.
 
 **API auth + exposure.** Mutating endpoints (`/upload`, `/chat`) require
-`PALIMPSEST_API_TOKEN` (a `Bearer` token) and are *disabled* if it is unset.
+`SESTRIAN_API_TOKEN` (a `Bearer` token) and are *disabled* if it is unset.
 Read + signed-tx endpoints are safe to expose. Restrict the bind interface with
 `--api-bind` where a public dashboard isn't wanted.
 

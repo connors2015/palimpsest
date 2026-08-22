@@ -189,7 +189,7 @@ def da_pointer(root: bytes) -> str:
 if __name__ == "__main__":
     import numpy as np
     print("=" * 70)
-    print("  PALIMPSEST — data-availability layer (erasure coding + sampling)")
+    print("  SESTRIAN — data-availability layer (erasure coding + sampling)")
     print("=" * 70)
     rng = np.random.default_rng(0)
     body = rng.integers(0, 256, size=4096, dtype=np.uint8).tobytes()

@@ -253,7 +253,7 @@ def _heads_state(net):
 
 def main():
     print("=" * 70)
-    print("  PALIMPSEST — gossip network: consensus with no coordinator")
+    print("  SESTRIAN — gossip network: consensus with no coordinator")
     print("=" * 70)
     net = Network(n_nodes=6, topology="full", seed=0)
     print("\n6 nodes, no coordinator. Each trains on its head, gossips signed")

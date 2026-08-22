@@ -1,4 +1,4 @@
-# Running a Palimpsest node — Linux install
+# Running a Sestrian node — Linux install
 
 Linux is the first-user target. This gets a volunteer from a fresh box with an
 Nvidia GPU to a running miner. (macOS/Apple-Silicon and Windows work too — the
@@ -13,7 +13,7 @@ client auto-detects MPS / CUDA / CPU.)
 
 ```bash
 # 1. get the code
-git clone <repo-url> palimpsest && cd palimpsest
+git clone <repo-url> sestrian && cd sestrian
 
 # 2. a virtual environment
 python3 -m venv .venv && source .venv/bin/activate

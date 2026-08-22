@@ -2299,41 +2299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "palimpsest-core"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "hex",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "palimpsest-node"
-version = "0.3.0"
-dependencies = [
- "argon2",
- "async-trait",
- "axum",
- "base64",
- "clap",
- "crypto_secretbox",
- "futures",
- "hex",
- "libc",
- "libp2p",
- "palimpsest-core",
- "rand 0.8.7",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zeroize",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3007,6 +2972,41 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "sestrian-core"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "sestrian-node"
+version = "0.3.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "axum",
+ "base64",
+ "clap",
+ "crypto_secretbox",
+ "futures",
+ "hex",
+ "libc",
+ "libp2p",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sestrian-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

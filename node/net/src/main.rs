@@ -1,19 +1,19 @@
-//! palimpsest-node — the production Rust node.
+//! sestrian-node — the production Rust node.
 //!
 //!   # a producing node with a PyTorch trainer attached:
-//!   palimpsest-node --data-dir ~/.palimpsest/node --wallet ~/.palimpsest/wallet.json \
+//!   sestrian-node --data-dir ~/.sestrian/node --wallet ~/.sestrian/wallet.json \
 //!       --port 7900 --api-port 8090 --bridge-port 7999 --produce \
 //!       --peers /ip4/…/udp/7900/quic-v1 --data-contributor <addr>
 //!   python -m client.miner_bridge --node-port 7999 --model small …
 //!
 //!   # a seed/relay node (always-on bootstrap; relays NAT'd peers):
-//!   palimpsest-node --data-dir /var/palimpsest --key-seed <hex32> \
+//!   sestrian-node --data-dir /var/sestrian --key-seed <hex32> \
 //!       --port 7900 --api-port 8090 --relay-server
 //!
 //! Genesis: --genesis-file <raw i64-LE .bin> (the ceremony artifact from
 //! client/make_genesis.py), or --toy-dim N for a deterministic toy vector.
 //! The wallet key IS the miner identity; encrypted wallets are decrypted with
-//! $PALIMPSEST_WALLET_PASSPHRASE (argon2id + XSalsa20-Poly1305, the exact
+//! $SESTRIAN_WALLET_PASSPHRASE (argon2id + XSalsa20-Poly1305, the exact
 //! pynacl construction).
 
 mod api;
@@ -24,7 +24,7 @@ mod store;
 
 use clap::Parser;
 use libp2p::{Multiaddr, SwarmBuilder};
-use palimpsest_core as core;
+use sestrian_core as core;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -131,7 +131,7 @@ struct Args {
     /// you cannot misconfigure yourself onto a chain that will never validate.
     #[arg(long, default_value = "devnet")]
     network: String,
-    #[arg(long, default_value = "palimpsest-data")]
+    #[arg(long, default_value = "sestrian-data")]
     data_dir: String,
     #[arg(long, default_value = "")]
     wallet: String,          // wallet.json (identity); or:
@@ -223,7 +223,7 @@ fn seed_from_hex(mut hexed: String) -> [u8; 32] {
 
 /// Load the node identity WITHOUT ever taking key material from argv (which is
 /// world-readable via ps/proc). Preferred sources, in order: a key file (0600),
-/// the PALIMPSEST_KEY_SEED env var, an (encrypted) wallet. --key-seed remains
+/// the SESTRIAN_KEY_SEED env var, an (encrypted) wallet. --key-seed remains
 /// only as a loud-deprecated fallback for local devnet.
 fn load_identity(args: &Args) -> [u8; 32] {
     if !args.key_file.is_empty() {
@@ -231,15 +231,15 @@ fn load_identity(args: &Args) -> [u8; 32] {
             .expect("--key-file unreadable");
         return seed_from_hex(hexed);
     }
-    if let Ok(hexed) = std::env::var("PALIMPSEST_KEY_SEED") {
+    if let Ok(hexed) = std::env::var("SESTRIAN_KEY_SEED") {
         if !hexed.is_empty() {
-            std::env::remove_var("PALIMPSEST_KEY_SEED"); // don't leak to children
+            std::env::remove_var("SESTRIAN_KEY_SEED"); // don't leak to children
             return seed_from_hex(hexed);
         }
     }
     if !args.key_seed.is_empty() {
         warn!("--key-seed passes the private key on the command line, visible in \
-               ps/proc to any local user; use --key-file or PALIMPSEST_KEY_SEED");
+               ps/proc to any local user; use --key-file or SESTRIAN_KEY_SEED");
         return seed_from_hex(args.key_seed.clone());
     }
     if !args.wallet.is_empty() {
@@ -249,14 +249,14 @@ fn load_identity(args: &Args) -> [u8; 32] {
             return hex::decode(sk).unwrap().try_into().unwrap();
         }
         if let Some(enc) = w.get("enc") {
-            let pw = std::env::var("PALIMPSEST_WALLET_PASSPHRASE")
-                .expect("encrypted wallet: set PALIMPSEST_WALLET_PASSPHRASE");
+            let pw = std::env::var("SESTRIAN_WALLET_PASSPHRASE")
+                .expect("encrypted wallet: set SESTRIAN_WALLET_PASSPHRASE");
             return decrypt_wallet(enc, &pw)
                 .expect("wallet decryption failed (wrong passphrase?)");
         }
         panic!("wallet file has neither sk nor enc");
     }
-    panic!("identity required: --key-file, PALIMPSEST_KEY_SEED, or --wallet");
+    panic!("identity required: --key-file, SESTRIAN_KEY_SEED, or --wallet");
 }
 
 /// Resolve the genesis weights: local disk (durable) -> --genesis-file ->
@@ -438,7 +438,7 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
     use futures::StreamExt;
     let (mut fails, mut warns) = (0u32, 0u32);
     let pass = |m: String| println!("  \x1b[32mPASS\x1b[0m  {m}");
-    println!("\npalimpsest preflight — can this machine contribute?\n");
+    println!("\nsestrian preflight — can this machine contribute?\n");
 
     // 1. identity + data dir (already opened above, so both are usable)
     pass(format!("identity loaded — miner {} / address {}",
@@ -658,7 +658,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
         .build();
 
-    let topic = libp2p::gossipsub::IdentTopic::new("palimpsest/v1");
+    let topic = libp2p::gossipsub::IdentTopic::new("sestrian/v1");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     // preflight binds an EPHEMERAL port: it must be runnable while your real
     // node is already up, otherwise the check you most want to run is the one
@@ -702,7 +702,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (api_tx, api_rx) = mpsc::channel(64);
     let (bridge_cmd_tx, bridge_cmd_rx) = mpsc::channel::<bridge::ToBridge>(16);
     let (bridge_ev_tx, bridge_ev_rx) = mpsc::channel::<bridge::FromBridge>(16);
-    let api_token = std::env::var("PALIMPSEST_API_TOKEN").ok().filter(|t| !t.is_empty());
+    let api_token = std::env::var("SESTRIAN_API_TOKEN").ok().filter(|t| !t.is_empty());
     tokio::spawn(api::run(args.api_bind.clone(), args.api_port, api_token, api_tx));
     tokio::spawn(bridge::run(args.bridge_port, bridge_cmd_rx, bridge_ev_tx));
 

@@ -237,7 +237,7 @@ class AsyncSocketCoordinator:
 
 def _print_async(chain, log, label):
     print("=" * 66)
-    print(f"  PALIMPSEST async node — {label}")
+    print(f"  SESTRIAN async node — {label}")
     print("=" * 66)
     print(f"{'blk':>3} {'root':>11} {'model_acc':>10} {'incl':>5} {'avg_lag':>8}")
     lag_so_far = []

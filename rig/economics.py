@@ -155,7 +155,7 @@ def slash_on_fraudulent_score(ledger: StakeLedger, validator: str, claimed: floa
 
 def main():
     print("=" * 68)
-    print("  PALIMPSEST — write-price homeostat + stake/slash")
+    print("  SESTRIAN — write-price homeostat + stake/slash")
     print("=" * 68)
     import numpy as np
     r = simulate_homeostat(target=8, blocks=120)

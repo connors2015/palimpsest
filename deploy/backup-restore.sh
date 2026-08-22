@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Consistent backup + restore of a Palimpsest node data-dir.
+# Consistent backup + restore of a Sestrian node data-dir.
 #
 # The store is backup-friendly by construction: the snapshot is written atomically
 # (temp + rename) and blocks.jsonl is strictly append-only, so a copy taken while

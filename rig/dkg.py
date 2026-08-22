@@ -62,7 +62,7 @@ def verify_share(share: int, m: int, commitments: list) -> bool:
     return normalize(lhs) == normalize(rhs)
 
 
-def run_dkg(n: int, t: int, seed: bytes = b"palimpsest-dkg") -> BeaconKeys:
+def run_dkg(n: int, t: int, seed: bytes = b"sestrian-dkg") -> BeaconKeys:
     """Simulate the full DKG among n participants and return the group keys.
 
     Raises if any dealt share fails verification (a caught cheater)."""
@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
     from .beacon import combine, partial_sign, randomness, verify
     print("=" * 68)
-    print("  PALIMPSEST — DKG (no trusted dealer)")
+    print("  SESTRIAN — DKG (no trusted dealer)")
     print("=" * 68)
     n, t = 5, 3
     keys = run_dkg(n, t)

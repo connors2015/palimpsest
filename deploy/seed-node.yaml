@@ -1,4 +1,4 @@
-# Palimpsest seed node — always-on bootstrap peer + relay for the network.
+# Sestrian seed node — always-on bootstrap peer + relay for the network.
 #
 # v3: a StatefulSet with a PERSISTENT VOLUME (the chain store survives pod
 # reschedule — no more emptyDir data loss) running the PREBUILT node image
@@ -7,8 +7,8 @@
 # an init container and then reused.
 #
 #   # one-time setup:
-#   kubectl create secret generic palimpsest-seed-key \
-#     --from-literal=key-seed=$(head -c32 /dev/urandom | xxd -p -c64) -n palimpsest
+#   kubectl create secret generic sestrian-seed-key \
+#     --from-literal=key-seed=$(head -c32 /dev/urandom | xxd -p -c64) -n sestrian
 #   kubectl apply -f deploy/seed-node.yaml
 #
 #   gossip/relay:  <node-ip>:30980 (udp+tcp)     api:  http://<node-ip>:30981
@@ -16,16 +16,16 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: seed-node
-  namespace: palimpsest
-  labels: {app: palimpsest-seed}
+  namespace: sestrian
+  labels: {app: sestrian-seed}
 spec:
   serviceName: seed-node
   replicas: 1
   selector:
-    matchLabels: {app: palimpsest-seed}
+    matchLabels: {app: sestrian-seed}
   template:
     metadata:
-      labels: {app: palimpsest-seed}
+      labels: {app: sestrian-seed}
     spec:
       initContainers:
         # Materialize the deterministic genesis onto the persistent volume ONCE.
@@ -38,7 +38,7 @@ spec:
               set -e
               if [ -f /data/genesis-seed.bin ]; then exit 0; fi
               # public repo: plain HTTPS clone, no deploy key needed
-              git clone --depth 1 https://github.com/connors2015/palimpsest.git /app
+              git clone --depth 1 https://github.com/connors2015/sestrian.git /app
               cd /app
               pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
               pip install --no-cache-dir numpy pynacl
@@ -48,7 +48,7 @@ spec:
       containers:
         - name: seed
           # CI builds + pushes this by git SHA; pin a digest in production.
-          image: ghcr.io/connors2015/palimpsest-node:latest
+          image: ghcr.io/connors2015/sestrian-node:latest
           args:
             - --data-dir=/data
             - --genesis-file=/data/genesis-seed.bin
@@ -60,13 +60,13 @@ spec:
             - --prune-depth=8
             - --data-contributor=3432d48fd6878b4f2e7a1e40cc15e112c512fae7
           env:
-            - name: PALIMPSEST_KEY_SEED
+            - name: SESTRIAN_KEY_SEED
               valueFrom:
-                secretKeyRef: {name: palimpsest-seed-key, key: key-seed}
+                secretKeyRef: {name: sestrian-seed-key, key: key-seed}
             # set to enable /upload + /chat; unset leaves them disabled (safe)
-            - name: PALIMPSEST_API_TOKEN
+            - name: SESTRIAN_API_TOKEN
               valueFrom:
-                secretKeyRef: {name: palimpsest-seed-key, key: api-token, optional: true}
+                secretKeyRef: {name: sestrian-seed-key, key: api-token, optional: true}
           ports:
             - {containerPort: 9800, protocol: UDP, name: gossip-udp}
             - {containerPort: 9800, protocol: TCP, name: gossip-tcp}
@@ -97,10 +97,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: seed-node
-  namespace: palimpsest
+  namespace: sestrian
 spec:
   type: NodePort
-  selector: {app: palimpsest-seed}
+  selector: {app: sestrian-seed}
   ports:
     - {name: gossip-udp, port: 9800, targetPort: 9800, nodePort: 30980, protocol: UDP}
     - {name: gossip-tcp, port: 9800, targetPort: 9800, nodePort: 30980, protocol: TCP}

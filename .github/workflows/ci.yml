@@ -75,8 +75,8 @@ jobs:
           file: deploy/Dockerfile
           push: ${{ github.ref == 'refs/heads/main' }}
           tags: |
-            ghcr.io/connors2015/palimpsest-node:latest
-            ghcr.io/connors2015/palimpsest-node:${{ github.sha }}
+            ghcr.io/connors2015/sestrian-node:latest
+            ghcr.io/connors2015/sestrian-node:${{ github.sha }}
 
   # The reference test suite. Advisory until the suite is pinned + green
   # (tracked separately); surfaces regressions in the rig without blocking.

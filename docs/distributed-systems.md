@@ -4,7 +4,7 @@ The rig started with a single trusted coordinator dictating an append-only list.
 This layer replaces the faked parts with real mechanisms, leaning on Bitcoin.
 What each part maps to:
 
-| Bitcoin | Palimpsest | Module |
+| Bitcoin | Sestrian | Module |
 |---|---|---|
 | Signed transactions | Signed `BackpropTx` delta commitments (Ed25519) | `rig/crypto.py`, `rig/ed25519.py` |
 | Block headers, prev-hash linking | `Header` committing prev_hash + state root + txset root + work | `rig/blockchain.py` |

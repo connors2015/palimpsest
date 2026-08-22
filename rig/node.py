@@ -1,4 +1,4 @@
-"""Multiprocess Palimpsest node: a coordinator and miner processes.
+"""Multiprocess Sestrian node: a coordinator and miner processes.
 
 A transport abstraction lets the same coordinator logic run two ways:
   * InMemoryTransport — miners are callables in-process (deterministic, used
@@ -188,7 +188,7 @@ class SocketCoordinator:
 
 def _print_log(chain, log, label):
     print("=" * 64)
-    print(f"  PALIMPSEST multiprocess node — {label}")
+    print(f"  SESTRIAN multiprocess node — {label}")
     print("=" * 64)
     print(f"{'blk':>3} {'root':>11} {'model_acc':>10} {'included':>9}")
     for i in range(len(log.heights)):

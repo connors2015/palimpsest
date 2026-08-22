@@ -100,7 +100,7 @@ def main():
 
     # --- Ed25519: seed -> pub; deterministic signature ------------------------
     key = Key.generate(b"golden-vector-seed-0123456789ab")
-    msg = b"palimpsest golden message"
+    msg = b"sestrian golden message"
     v["ed25519"] = [{"seed_hex": key.sk.hex(), "pub_hex": key.pub,
                      "msg_hex": msg.hex(), "sig_hex": key.sign(msg).hex()}]
 

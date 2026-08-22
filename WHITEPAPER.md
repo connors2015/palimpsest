@@ -1,6 +1,6 @@
-# Palimpsest — a chain whose state is a mind
+# Sestrian — a chain whose state is a mind
 
-*Working codename: Palimpsest (a surface written over many times, whose history stays recoverable). Final name TBD.*
+*Working codename: Sestrian (a surface written over many times, whose history stays recoverable). Final name TBD.*
 *Master design document. Each section tracks a task in the project task list; sections are drafted in order and drilled down individually.*
 
 > **Implementation status.** This is the design. For what is actually enforced
@@ -20,7 +20,7 @@
 
 ## 1. Overview
 
-**Thesis.** Palimpsest is a blockchain whose state is the weights of a single public neural network. Transactions are the model's own computations: **backprops** — gradient deltas that transition the state and earn rewards — and **forward-props** — inference calls that pay fees and emit cryptographically attested outputs. A block is one aggregation step of distributed training; the block header commits a weights-state root; replaying the chain from genesis reconstructs the model bit-for-bit. The chain does not *record* a model. The chain *is* a model.
+**Thesis.** Sestrian is a blockchain whose state is the weights of a single public neural network. Transactions are the model's own computations: **backprops** — gradient deltas that transition the state and earn rewards — and **forward-props** — inference calls that pay fees and emit cryptographically attested outputs. A block is one aggregation step of distributed training; the block header commits a weights-state root; replaying the chain from genesis reconstructs the model bit-for-bit. The chain does not *record* a model. The chain *is* a model.
 
 **The flywheel.** Compute joins the network and does one of two jobs: improve the weights, or serve them. Inference revenue — real usage fees, not token inflation — pays both jobs. A better model attracts more usage; more usage funds more training; more training makes a better model. The network is self-funding by construction, and the design's central economic discipline is that rewards are anchored to revenue the chain actually earns, with bootstrap emissions carrying a hard, milestone-tied sunset. (§9)
 
@@ -77,7 +77,7 @@ Bittensor is the field's largest natural experiment in incentivized ML, and its 
 
 ### 2.4 The uniqueness claim, stated precisely
 
-Ambient markets "the model as network state" philosophically, and commits checkpoint hashes on-chain. So our claim is made at the mechanism level, where it is uncontested: **no existing network makes the weight-update itself the transaction, such that replaying the chain's blocks reconstructs the model's weights.** Palimpsest's blocks *are* optimizer steps; its state root *is* a commitment to the weights; its history *is* the training run. Everything we adopt from the field (Gauntlet-style scoring, Verde-style disputes, DiLoCo-style communication, DisTrO-style compression, TEE attestation) is proven; everything we add (model-as-state, block-as-outer-step, scored-mempool consensus, revenue-anchored economics) is unclaimed.
+Ambient markets "the model as network state" philosophically, and commits checkpoint hashes on-chain. So our claim is made at the mechanism level, where it is uncontested: **no existing network makes the weight-update itself the transaction, such that replaying the chain's blocks reconstructs the model's weights.** Sestrian's blocks *are* optimizer steps; its state root *is* a commitment to the weights; its history *is* the training run. Everything we adopt from the field (Gauntlet-style scoring, Verde-style disputes, DiLoCo-style communication, DisTrO-style compression, TEE attestation) is proven; everything we add (model-as-state, block-as-outer-step, scored-mempool consensus, revenue-anchored economics) is unclaimed.
 
 ## 3. Architecture — the model as chain state
 
@@ -239,9 +239,9 @@ Proposer selection is stake-weighted from the committee; fork choice is heaviest
 
 ### 6.1 The unification
 
-DiLoCo-family training — the reason internet-scale training exists — has workers train *locally* for H inner steps (hundreds), then synchronize once in an outer aggregation step, cutting communication ~100–500×. Palimpsest does not bolt a blockchain onto this loop; it observes that the loop *already is* a blockchain cadence:
+DiLoCo-family training — the reason internet-scale training exists — has workers train *locally* for H inner steps (hundreds), then synchronize once in an outer aggregation step, cutting communication ~100–500×. Sestrian does not bolt a blockchain onto this loop; it observes that the loop *already is* a blockchain cadence:
 
-| DiLoCo | Palimpsest |
+| DiLoCo | Sestrian |
 |---|---|
 | Outer synchronization round | Block |
 | Worker's local inner run (H steps) | Miner's work between blocks |
@@ -301,7 +301,7 @@ The founding intuition — "poisoning requires 50%+1 once the community is large
    *Implemented (protocol rev 3) as the on-chain **challenge market**.* A data submission is a signed, staked `DataSubmitTx`; the entry lives in the ledger's **data registry** (owner wallet, content hash, media type, escrowed stake) and earns the block data share in proportion to weight (v1: stake-weighted, with the genesis corpus at a published weight; attribution-weighted royalties replace weights at the TRAK milestone). Anyone may file a staked `DataChallengeTx` against an entry's *validity* or *ownership*, opening a fixed voting window. **Jurors are the recent block proposers** (the last `PROPOSER_LOOKBACK` blocks) — seats earned by verifiable work, not bought — voting via `DataVoteTx`. At expiry, deterministically: upheld → the entry is revoked, its escrowed stake goes to the challenger; rejected (including no-quorum) → the challenger's stake goes to the entry's owner. Either way, lying costs and honesty pays; the registry, challenges, and votes are all part of the ledger root, so every node enforces identical outcomes. Media type is a registry field, not a protocol constraint — bytes are bytes (§3.1), so spreadsheets, images, and any future modality enter through the same gate.
 3. **Canary and trigger probing as validator duty.** Committee scoring (§5.2) includes probes beyond loss: behavioral canaries, regression suites on protected capabilities, and sweeps over *known* trigger families. This catches crude poisoning and any trigger the defender can generate — but the red-team (Phase 0, `rig/redteam.py`) is unambiguous about its limit: a stealthy backdoor keyed to an attacker-chosen, out-of-distribution trigger is **invisible to blind probing**, because you cannot probe a trigger you don't know. Probing is a cost-raiser, not a guarantee. The guarantees live in mechanisms 2 (admission cost), 4 (vested clawback), and 5 (excision) — not here.
 4. **Vested data rewards with clawback.** Data rewards vest over many checkpoints; a shard later proven poisoned slashes its submitter's remaining vest and bounties the prover — extending the challenge economics deep into the past.
-5. **The immune system: influence audit and excision.** Unique to this architecture: because the chain replays (§3.5), a discovered backdoor can be *traced* (which shards, which deltas, which blocks — influence analysis over the recorded history) and *excised*: replay the chain from the last clean checkpoint with the offending shards' deltas removed, under a governance-declared emergency procedure (§10.4). Every off-chain competitor can only apologize and retrain from scratch; a model-chain can perform verifiable surgical unlearning. Poisoning Palimpsest is not impossible — it is *evidence-generating and reversible*, which changes the attacker's calculus entirely.
+5. **The immune system: influence audit and excision.** Unique to this architecture: because the chain replays (§3.5), a discovered backdoor can be *traced* (which shards, which deltas, which blocks — influence analysis over the recorded history) and *excised*: replay the chain from the last clean checkpoint with the offending shards' deltas removed, under a governance-declared emergency procedure (§10.4). Every off-chain competitor can only apologize and retrain from scratch; a model-chain can perform verifiable surgical unlearning. Poisoning Sestrian is not impossible — it is *evidence-generating and reversible*, which changes the attacker's calculus entirely.
 
 **Residual**: a stealthy backdoor that passes probes, survives the window, and is never detected is not excised. The Phase 0 red-team confirms this is the real state of affairs, not a hedge: blind input-space detection fails, and a slow-drip coalition can accumulate a strong backdoor from deltas each *less* conspicuous than honest work. What the red-team also confirms is that this residual is **recoverable, not fatal** — once a trigger is disclosed (by bounty, audit, or the attacker exercising it), the known-trigger probe catches it trivially and replay-excision removes it (backdoor 0.94 → 0.00 at modest clean cost). Detection quality is the open research frontier (§12.3); reversibility is the guarantee we actually hold.
 
@@ -360,7 +360,7 @@ Weights are public every block by construction (§3.5). Anyone may pull the delt
 
 ### 9.1 The discipline
 
-The field's flagship economy runs a 22–40:1 emissions-to-revenue subsidy and calls it a flywheel (§2.3). Palimpsest's economic constitution is one sentence: **rewards are anchored to fees the chain actually earns; issuance exists only to bootstrap, and it sunsets on revenue milestones enshrined in the protocol.** Every design choice below serves that sentence.
+The field's flagship economy runs a 22–40:1 emissions-to-revenue subsidy and calls it a flywheel (§2.3). Sestrian's economic constitution is one sentence: **rewards are anchored to fees the chain actually earns; issuance exists only to bootstrap, and it sunsets on revenue milestones enshrined in the protocol.** Every design choice below serves that sentence.
 
 ### 9.2 The token and the flows
 
@@ -388,7 +388,7 @@ Backprop admission (§4.1) carries a floating fee: when candidate-delta volume e
 
 ### 9.4a The capacity retarget — model size as difficulty
 
-The fourth knob of the homeostat family, and the one that makes joining compute *compound* instead of merely crowding: **the parameter count itself retargets against the network's training capacity**, the way Bitcoin's difficulty retargets against hash power. Where Bitcoin spends surplus compute on a harder puzzle (security), Palimpsest spends it on a bigger brain (capability — which *is* our security: every joined GPU is embodied in weights a challenger must reproduce, and outvoting the training set grows proportionally costlier).
+The fourth knob of the homeostat family, and the one that makes joining compute *compound* instead of merely crowding: **the parameter count itself retargets against the network's training capacity**, the way Bitcoin's difficulty retargets against hash power. Where Bitcoin spends surplus compute on a harder puzzle (security), Sestrian spends it on a bigger brain (capability — which *is* our security: every joined GPU is embodied in weights a challenger must reproduce, and outvoting the training set grows proportionally costlier).
 
 Two things Bitcoin's controller never had to face, and their resolutions:
 
@@ -506,7 +506,7 @@ Per the founding memo's doctrine, the limits section is first-principles and unf
 
 ### 12.1 Physics and cost
 
-- **The frontier is out of reach.** Internet-scale training is proven to ~100B; 10²⁶-FLOP frontier runs remain bandwidth-bound. Palimpsest will not train the world's best general model this decade; the strategy (§11) is built *around* that fact, not in denial of it. If bandwidth research stalls, the network's ceiling stalls with it.
+- **The frontier is out of reach.** Internet-scale training is proven to ~100B; 10²⁶-FLOP frontier runs remain bandwidth-bound. Sestrian will not train the world's best general model this decade; the strategy (§11) is built *around* that fact, not in denial of it. If bandwidth research stalls, the network's ceiling stalls with it.
 - **The permanent handicap.** Scoring overhead, DA redundancy, WAN sync, and commit-reveal latency cost an estimated 2–3× per useful FLOP versus a centralized cluster. The design claws some back (miner-side efficiency competition, §6.3; serving/training fleet unification, §8.3) and the economics must simply carry the rest. If the handicap turns out to be 10× rather than 3×, §9.5's tunnel arithmetic fails.
 
 ### 12.2 Economic reflexivity
@@ -526,7 +526,7 @@ A token with fee flows is a securities-law event in most jurisdictions (the §9.
 
 ### 12.5 Competition
 
-Ambient shipping its mainnet validates the category and occupies the narrative high ground of "model as network state" (§2.4). The ex-Covenant team could launch a Palimpsest-shaped network with a two-year credibility head start. A frontier lab releasing strong open weights in our chosen vertical compresses the quality gap our fee base rests on. And the field's protocol bodies (A2A/x402 foundations) could standardize enough agent-payment trust that parts of §8's premium become commodity. Speed to the crossover proof (§11.3) is the only durable answer.
+Ambient shipping its mainnet validates the category and occupies the narrative high ground of "model as network state" (§2.4). The ex-Covenant team could launch a Sestrian-shaped network with a two-year credibility head start. A frontier lab releasing strong open weights in our chosen vertical compresses the quality gap our fee base rests on. And the field's protocol bodies (A2A/x402 foundations) could standardize enough agent-payment trust that parts of §8's premium become commodity. Speed to the crossover proof (§11.3) is the only durable answer.
 
 ### 12.6 Falsifiers
 
@@ -542,4 +542,4 @@ The thesis is dead, and should be declared dead, if any of the following holds:
 
 ## Coda
 
-Five requirements generated the transformer; this document's claim is that five requirements generate Palimpsest: a public model no one owns, compute that must be paid from value rather than inflation, training that must be verifiable by strangers, a ledger durable enough to be the model's only body, and incentives that make honesty the profitable strategy. Enumerate the ways to satisfy all five at once and — as with attention — very little survives: the model must *be* the chain, blocks must *be* optimizer steps, and revenue must *be* the reward. Whether the surviving design also survives contact with reality is what Phase 0 exists to measure. Stop citing; start seeing.
+Five requirements generated the transformer; this document's claim is that five requirements generate Sestrian: a public model no one owns, compute that must be paid from value rather than inflation, training that must be verifiable by strangers, a ledger durable enough to be the model's only body, and incentives that make honesty the profitable strategy. Enumerate the ways to satisfy all five at once and — as with attention — very little survives: the model must *be* the chain, blocks must *be* optimizer steps, and revenue must *be* the reward. Whether the surviving design also survives contact with reality is what Phase 0 exists to measure. Stop citing; start seeing.

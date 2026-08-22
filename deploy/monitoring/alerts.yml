@@ -1,17 +1,17 @@
-# Palimpsest alerting rules. Load via prometheus.yml rule_files.
+# Sestrian alerting rules. Load via prometheus.yml rule_files.
 groups:
-  - name: palimpsest
+  - name: sestrian
     rules:
       - alert: NodeDown
-        expr: up{job="palimpsest"} == 0
+        expr: up{job="sestrian"} == 0
         for: 2m
         labels: { severity: critical }
         annotations:
-          summary: "Palimpsest node {{ $labels.instance }} is unreachable"
+          summary: "Sestrian node {{ $labels.instance }} is unreachable"
 
       - alert: ChainStalled
         # head height has not advanced at all in 15 minutes
-        expr: increase(palimpsest_height[15m]) == 0
+        expr: increase(sestrian_height[15m]) == 0
         for: 1m
         labels: { severity: critical }
         annotations:
@@ -19,7 +19,7 @@ groups:
 
       - alert: DeltaPoolNearCap
         # MAX_DELTA_POOL is 512; warn well before eviction thrash
-        expr: palimpsest_delta_pool > 480
+        expr: sestrian_delta_pool > 480
         for: 5m
         labels: { severity: warning }
         annotations:
@@ -27,7 +27,7 @@ groups:
 
       - alert: PendingBlocksHigh
         # MAX_PENDING is 256; sustained high pending means sync is not keeping up
-        expr: palimpsest_pending_blocks > 200
+        expr: sestrian_pending_blocks > 200
         for: 5m
         labels: { severity: warning }
         annotations:
@@ -35,14 +35,14 @@ groups:
 
       - alert: ProducerHasNoModel
         # a producing node with no training bridge attached contributes nothing
-        expr: palimpsest_producer == 1 and palimpsest_model_attached == 0
+        expr: sestrian_producer == 1 and sestrian_model_attached == 0
         for: 10m
         labels: { severity: warning }
         annotations:
           summary: "Producer {{ $labels.instance }} has no training bridge attached"
 
       - alert: NoPeers
-        expr: palimpsest_peers == 0
+        expr: sestrian_peers == 0
         for: 10m
         labels: { severity: warning }
         annotations:

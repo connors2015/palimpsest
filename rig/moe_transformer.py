@@ -370,7 +370,7 @@ if __name__ == "__main__":
     model = MoETransformer(cfg)
     total_experts = cfg.n_layers * cfg.n_experts
     print("=" * 70)
-    print("  PALIMPSEST — MoE transformer through the chain")
+    print("  SESTRIAN — MoE transformer through the chain")
     print("=" * 70)
     print(f"{model.param_count} params | {cfg.n_layers} layers x {cfg.n_experts} "
           f"experts (top-{cfg.top_k}) | task={cfg.task}")

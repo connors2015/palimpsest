@@ -4,7 +4,7 @@
 //! client does).
 
 use base64::Engine;
-use palimpsest_core::{
+use sestrian_core::{
     self as core,
     blocktree::Block,
     token::{AccountTx, DataChallengeTx, DataSubmitTx, DataVoteTx, InferenceReceiptTx, TransferTx},

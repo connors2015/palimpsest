@@ -1,6 +1,6 @@
 """Your wallet — an Ed25519 keypair on YOUR machine, never anywhere else.
 
-The secret key lives in a mode-0600 file under ~/.palimpsest/ (or --path),
+The secret key lives in a mode-0600 file under ~/.sestrian/ (or --path),
 ENCRYPTED with a passphrase (argon2id key derivation + libsodium SecretBox) —
 and is never transmitted, never logged, and must NEVER enter a git repository.
 On creation you also get a BIP39 24-word mnemonic: write it down; it alone can
@@ -31,7 +31,7 @@ import urllib.request
 from rig.crypto import Key
 from rig.token import GRAIN, TransferTx, address
 
-DEFAULT_DIR = os.path.expanduser("~/.palimpsest")
+DEFAULT_DIR = os.path.expanduser("~/.sestrian")
 DEFAULT_PATH = os.path.join(DEFAULT_DIR, "wallet.json")
 HRP = "pal"                                       # bech32 human-readable prefix
 
@@ -114,8 +114,8 @@ def create(path: str, passphrase_env: str | None = None) -> dict:
             "wallet new needs a terminal to prompt for a passphrase.\n"
             "Non-interactive? Use --passphrase-env VAR (unset/empty = "
             "unencrypted), e.g.:\n"
-            "  PALIMPSEST_WALLET_PASSPHRASE=... python -m client.wallet new "
-            "--passphrase-env PALIMPSEST_WALLET_PASSPHRASE")
+            "  SESTRIAN_WALLET_PASSPHRASE=... python -m client.wallet new "
+            "--passphrase-env SESTRIAN_WALLET_PASSPHRASE")
     else:
         pw = getpass.getpass("passphrase for the wallet file (empty = unencrypted): ")
         if pw and pw != getpass.getpass("repeat passphrase: "):
@@ -244,7 +244,7 @@ def main():
     elif a.cmd == "balance":
         out = _get(a.node, f"/balance?addr={rec['address']}")
         print(f"address: {to_display(rec['address'])}")
-        print(f"balance: {out['grains'] / GRAIN:.9f} PALIMPSEST "
+        print(f"balance: {out['grains'] / GRAIN:.9f} SESTRIAN "
               f"({out['grains']} grains) @ block {out['height']}")
     elif a.cmd == "send":
         if not a.to or a.amount is None:

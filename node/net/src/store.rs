@@ -12,8 +12,8 @@
 //! missing snapshot silently degrades to full replay from genesis.
 
 use crate::proto::{Payload, StoredBlock};
-use palimpsest_core::blocktree::BlockTree;
-use palimpsest_core::token::TokenLedger;
+use sestrian_core::blocktree::BlockTree;
+use sestrian_core::token::TokenLedger;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -53,7 +53,7 @@ impl Store {
         if rc != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
-                format!("another palimpsest-node already holds {}", path.display()),
+                format!("another sestrian-node already holds {}", path.display()),
             ));
         }
         Ok(file)
@@ -65,7 +65,7 @@ impl Store {
         if path.exists() {
             return Ok(());
         }
-        fs::write(path, palimpsest_core::int64_bytes(w))
+        fs::write(path, sestrian_core::int64_bytes(w))
     }
 
     pub fn read_genesis(&self) -> Option<Vec<i64>> {
@@ -171,7 +171,7 @@ impl Store {
         }
         fs::create_dir_all(&dir).ok()?;
         let mut write_err = None;
-        let root = palimpsest_core::da::disperse_streaming(bytes, k, n, |i, sh| {
+        let root = sestrian_core::da::disperse_streaming(bytes, k, n, |i, sh| {
             if let Err(e) = fs::write(dir.join(format!("{i}.shard")), sh) {
                 write_err.get_or_insert(e);
             }
@@ -204,7 +204,7 @@ impl Store {
                 }
             }
         }
-        palimpsest_core::da::reconstruct(&shards, k, orig_len)
+        sestrian_core::da::reconstruct(&shards, k, orig_len)
     }
 
     /// Erasure-code + Merkle-commit a payload into N shards under da/<txid>/, so
@@ -227,7 +227,7 @@ impl Store {
     /// instead of regenerating it locally (needs torch) or downloading it from a
     /// single host. Idempotent; safe to call on every boot.
     pub fn disperse_genesis(&self, g: &[i64]) -> Option<String> {
-        self.disperse_bytes(Self::GENESIS_DA_KEY, &palimpsest_core::int64_bytes(g),
+        self.disperse_bytes(Self::GENESIS_DA_KEY, &sestrian_core::int64_bytes(g),
                             Self::GENESIS_DA_K, Self::GENESIS_DA_N)
     }
 
@@ -382,7 +382,7 @@ impl Store {
     pub fn write_snapshot(&self, block_hash: &str, height: u64, state: &[i64],
                           ledger: &TokenLedger) {
         let bin_tmp = self.dir.join("snapshot.bin.tmp");
-        if fs::write(&bin_tmp, palimpsest_core::int64_bytes(state)).is_err() {
+        if fs::write(&bin_tmp, sestrian_core::int64_bytes(state)).is_err() {
             return;
         }
         let _ = fs::rename(&bin_tmp, self.dir.join("snapshot.bin"));
@@ -545,7 +545,7 @@ mod store_tests {
 
     fn tmpdir(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("palimpsest-store-test-{}-{}", std::process::id(), tag));
+        p.push(format!("sestrian-store-test-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&p);
         p
     }
@@ -723,13 +723,13 @@ mod store_tests {
     /// Capacity check against a REAL genesis, for planning the one-time cost a
     /// node pays to become a genesis source. Ignored by default (needs a real
     /// genesis.bin and writes ~3x its size):
-    ///   PALIMPSEST_GENESIS_BIN=~/.palimpsest/genesis.bin \
-    ///     cargo test -p palimpsest-node genesis_dispersal_cost -- --ignored --nocapture
+    ///   SESTRIAN_GENESIS_BIN=~/.sestrian/genesis.bin \
+    ///     cargo test -p sestrian-node genesis_dispersal_cost -- --ignored --nocapture
     #[test]
     #[ignore]
     fn genesis_dispersal_cost() {
-        let Ok(path) = std::env::var("PALIMPSEST_GENESIS_BIN") else {
-            eprintln!("set PALIMPSEST_GENESIS_BIN to run this"); return;
+        let Ok(path) = std::env::var("SESTRIAN_GENESIS_BIN") else {
+            eprintln!("set SESTRIAN_GENESIS_BIN to run this"); return;
         };
         let raw = fs::read(&path).expect("genesis.bin unreadable");
         let g: Vec<i64> = raw.chunks_exact(8)

@@ -1,4 +1,4 @@
-"""End-to-end toy Palimpsest chain — the whole flywheel in one process.
+"""End-to-end toy Sestrian chain — the whole flywheel in one process.
 
 This is the "off the ground" demo (WHITEPAPER §11.3 Phase 0): a single node
 that turns every block through the complete loop and shows the pieces working
@@ -157,7 +157,7 @@ def run_chain(seed: int = 7, blocks: int = BLOCKS, verbose: bool = True,
 
 def _print_report(rows, ledger, accs, replay_ok):
     print("=" * 70)
-    print("  PALIMPSEST — end-to-end toy chain  (tiny transformer)")
+    print("  SESTRIAN — end-to-end toy chain  (tiny transformer)")
     print("=" * 70)
     print(f"\n{'blk':>3} {'state_root':>11} {'model_acc':>10} {'incl':>5} "
           f"{'serve_ok':>9} {'fake_caught':>12}")

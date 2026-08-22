@@ -1,4 +1,4 @@
-# Palimpsest client — train the model, earn from it
+# Sestrian client — train the model, earn from it
 
 This is the real thing (not the numpy mechanism-proof in `../rig/`): a client
 that trains an actual PyTorch language model on your own GPU and contributes to

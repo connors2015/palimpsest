@@ -1,4 +1,4 @@
-# Palimpsest — Threat Model & Security Posture
+# Sestrian — Threat Model & Security Posture
 
 Status as of the production-hardening pass. This is the brief for the external
 audit (a genesis-ceremony precondition) and the map from each attack to its
@@ -47,7 +47,7 @@ enforced in code today versus what is designed but awaits the testnet phase.
 |---|---|---|
 | Unbounded mempool/cache growth → OOM | every pool size-capped with eviction; deltas admitted only within a near-head window; account txs gated by ledger nonce; `seen` is a bounded ring | `node.rs` (tasks 98/99) |
 | Fill the disk via `/upload` | balance checked before writing; endpoint gated by admin token | `node.rs`/`api.rs` (task 100) |
-| Spend the operator's wallet / monopolize the trainer via the API | `/upload` + `/chat` require `Authorization: Bearer` (PALIMPSEST_API_TOKEN); disabled if unset | `api.rs` (task 100) |
+| Spend the operator's wallet / monopolize the trainer via the API | `/upload` + `/chat` require `Authorization: Bearer` (SESTRIAN_API_TOKEN); disabled if unset | `api.rs` (task 100) |
 | Force a 512MB allocation via a sync response | request read capped 64KB, response 96MB; serve is byte-budgeted | `node.rs` (tasks 101/105) |
 | Flood max-size gossip messages | gossipsub peer scoring + graylisting | `node.rs` behaviour (task 105) |
 | Strand a lagging node (old 2-block/90s cap) | byte-budgeted serve + continuous re-request | `node.rs` (task 101) |

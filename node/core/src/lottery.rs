@@ -17,7 +17,7 @@ pub const TARGET_PROPOSERS: u64 = 2;
 /// The per-height randomness seed, bound to the parent and height.
 pub fn seed(prev_hash: &str, height: u64) -> [u8; 32] {
     let mut m = Sha256::new();
-    m.update(format!("palimpsest-lottery|{prev_hash}|{height}").as_bytes());
+    m.update(format!("sestrian-lottery|{prev_hash}|{height}").as_bytes());
     m.finalize().into()
 }
 

@@ -2,7 +2,7 @@
 //! (scripts/golden_vectors.py -> node/vectors/golden.json) must reproduce
 //! bit-exactly. If this fails, the Rust node is wrong — the rig is the spec.
 
-use palimpsest_core as core;
+use sestrian_core as core;
 use serde_json::Value;
 
 fn vectors() -> Value {
@@ -141,7 +141,7 @@ fn header_hash_matches_reference() {
 
 #[test]
 fn address_and_emission_match_reference() {
-    use palimpsest_core::token;
+    use sestrian_core::token;
     for case in vectors()["address"].as_array().unwrap() {
         assert_eq!(token::address(case["pub_hex"].as_str().unwrap()),
                    case["address"].as_str().unwrap());
@@ -153,8 +153,8 @@ fn address_and_emission_match_reference() {
     }
 }
 
-fn transfer_from(t: &Value) -> palimpsest_core::token::TransferTx {
-    palimpsest_core::token::TransferTx {
+fn transfer_from(t: &Value) -> sestrian_core::token::TransferTx {
+    sestrian_core::token::TransferTx {
         from_pub: t["from_pub"].as_str().unwrap().into(),
         to_addr: t["to_addr"].as_str().unwrap().into(),
         amount: t["amount"].as_u64().unwrap(),
@@ -165,7 +165,7 @@ fn transfer_from(t: &Value) -> palimpsest_core::token::TransferTx {
 
 #[test]
 fn ledger_matches_reference() {
-    use palimpsest_core::token::{self, AccountTx, TokenLedger};
+    use sestrian_core::token::{self, AccountTx, TokenLedger};
     for case in vectors()["ledger"].as_array().unwrap() {
         let miners: Vec<String> = case["miners"].as_array().unwrap()
             .iter().map(|x| x.as_str().unwrap().to_string()).collect();
@@ -194,7 +194,7 @@ fn ledger_matches_reference() {
 
 #[test]
 fn data_provenance_matches_reference() {
-    use palimpsest_core::token::TokenLedger;
+    use sestrian_core::token::TokenLedger;
     use std::collections::BTreeMap;
     for case in vectors()["data_provenance"].as_array().unwrap() {
         let mut led = TokenLedger::new();
@@ -215,7 +215,7 @@ fn data_provenance_matches_reference() {
                    case["balance_a"].as_u64().unwrap(), "named corpus owner payout");
         assert_eq!(led.balance(case["owner_b"].as_str().unwrap()),
                    case["balance_b"].as_u64().unwrap(), "unnamed corpus must earn 0");
-        assert_eq!(led.balance(&palimpsest_core::token::address(miner)),
+        assert_eq!(led.balance(&sestrian_core::token::address(miner)),
                    case["miner_after"].as_u64().unwrap(), "miner share");
         assert_eq!(led.root(), case["root"].as_str().unwrap(),
                    "provenance-payout ledger root mismatch");
@@ -226,7 +226,7 @@ fn data_provenance_matches_reference() {
 fn scoring_matches_reference() {
     // rev 7: the miner pool splits ∝ committed delta scores; all-zero weights
     // fall back to the equal split. Roots lock the serialization.
-    use palimpsest_core::token::{address, TokenLedger};
+    use sestrian_core::token::{address, TokenLedger};
     use std::collections::BTreeMap;
     for case in vectors()["scoring"].as_array().unwrap() {
         let a = case["miner_a"].as_str().unwrap();
@@ -256,7 +256,7 @@ fn fee_flows_match_reference() {
     // rev 6: an inference fee splits 60/20/20 (server instant, data + training
     // slices into the ledger fee pools), and the NEXT block's reward drains the
     // pools to its delta miners + provenance-named data owners.
-    use palimpsest_core::token::{address, AccountTx, InferenceReceiptTx, TokenLedger};
+    use sestrian_core::token::{address, AccountTx, InferenceReceiptTx, TokenLedger};
     use std::collections::{BTreeMap, HashSet};
     for case in vectors()["fee_flows"].as_array().unwrap() {
         let payer = case["payer_pub"].as_str().unwrap();
@@ -298,8 +298,8 @@ fn fee_flows_match_reference() {
     }
 }
 
-fn data_tx_from(kind: &str, t: &Value) -> palimpsest_core::token::AccountTx {
-    use palimpsest_core::token::*;
+fn data_tx_from(kind: &str, t: &Value) -> sestrian_core::token::AccountTx {
+    use sestrian_core::token::*;
     let sig = hex::decode(t["sig_hex"].as_str().unwrap()).unwrap();
     match kind {
         "submit" => AccountTx::DataSubmit(DataSubmitTx {
@@ -328,7 +328,7 @@ fn data_tx_from(kind: &str, t: &Value) -> palimpsest_core::token::AccountTx {
 
 #[test]
 fn data_lane_matches_reference() {
-    use palimpsest_core::token::{address, data_root, TokenLedger};
+    use sestrian_core::token::{address, data_root, TokenLedger};
     use std::collections::HashSet;
     for case in vectors()["data_lane"].as_array().unwrap() {
         let mut led = TokenLedger::new();
@@ -360,7 +360,7 @@ fn data_lane_matches_reference() {
         led.resolve_expired_challenges(case["resolve_height"].as_u64().unwrap());
         assert_eq!(led.root(), case["root_after_resolve"].as_str().unwrap(),
                    "challenge resolution mismatch");
-        assert_eq!(led.balance(&palimpsest_core::token::address(&challenger)),
+        assert_eq!(led.balance(&sestrian_core::token::address(&challenger)),
                    case["challenger_balance_after"].as_u64().unwrap());
         let mut all = vec![sub, ch];
         all.extend(votes);
@@ -370,7 +370,7 @@ fn data_lane_matches_reference() {
 
 #[test]
 fn full_chain_replay_matches_reference() {
-    use palimpsest_core::blocktree::{Block, BlockTree};
+    use sestrian_core::blocktree::{Block, BlockTree};
     use std::collections::HashMap;
     for case in vectors()["chain_replay"].as_array().unwrap() {
         let genesis_w = i64s(&case["genesis_w"]);
@@ -435,7 +435,7 @@ fn full_chain_replay_matches_reference() {
 
 #[test]
 fn da_matches_reference() {
-    use palimpsest_core::da;
+    use sestrian_core::da;
     use std::collections::BTreeMap;
     for case in vectors()["da"].as_array().unwrap() {
         let body = hex::decode(case["body_hex"].as_str().unwrap()).unwrap();
@@ -479,7 +479,7 @@ fn da_matches_reference() {
 
 #[test]
 fn capacity_retarget_matches_reference() {
-    use palimpsest_core::capacity::CapacityRetarget;
+    use sestrian_core::capacity::CapacityRetarget;
     for case in vectors()["capacity"].as_array().unwrap() {
         let mut ctrl = CapacityRetarget::default();
         for w in case["windows"].as_array().unwrap() {
@@ -502,7 +502,7 @@ fn capacity_retarget_matches_reference() {
 
 #[test]
 fn lottery_matches_reference() {
-    use palimpsest_core::{lottery, Key};
+    use sestrian_core::{lottery, Key};
     for case in vectors()["lottery"].as_array().unwrap() {
         let pub_hex = case["pub"].as_str().unwrap();
         let prev = case["prev_hash"].as_str().unwrap();
@@ -529,7 +529,7 @@ fn lottery_matches_reference() {
 
 #[test]
 fn bond_lifecycle_matches_reference() {
-    use palimpsest_core::token::{address, TokenLedger, BOND_WINDOW};
+    use sestrian_core::token::{address, TokenLedger, BOND_WINDOW};
     for case in vectors()["bond"].as_array().unwrap() {
         let miner = case["miner"].as_str().unwrap();
         let addr = address(miner);
@@ -552,7 +552,7 @@ fn bond_lifecycle_matches_reference() {
 
 #[test]
 fn inference_receipt_matches_reference() {
-    use palimpsest_core::token::{address, AccountTx, InferenceReceiptTx, TokenLedger};
+    use sestrian_core::token::{address, AccountTx, InferenceReceiptTx, TokenLedger};
     use std::collections::HashSet;
     for case in vectors()["inference"].as_array().unwrap() {
         let payer = case["payer_pub"].as_str().unwrap();
@@ -585,8 +585,8 @@ fn sketches_match_reference() {
     // owner paid directly, anti-aligned -> pooled), signing-bytes parity for
     // the answer_sketch framed field. Delta-sketch VALUES are committed data
     // (the hash projection lives in the rig only), so the vector supplies them.
-    use palimpsest_core::blocktree::{sketch_root, SKETCH_DIM};
-    use palimpsest_core::token::{AccountTx, InferenceReceiptTx, TokenLedger};
+    use sestrian_core::blocktree::{sketch_root, SKETCH_DIM};
+    use sestrian_core::token::{AccountTx, InferenceReceiptTx, TokenLedger};
     use std::collections::{BTreeMap, HashSet};
     for case in vectors()["sketches"].as_array().unwrap() {
         let sk: Vec<i32> = case["sketch"].as_array().unwrap()

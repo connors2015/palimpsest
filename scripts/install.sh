@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Palimpsest one-command setup: build, wallet, genesis, preflight, (optional) service.
+# Sestrian one-command setup: build, wallet, genesis, preflight, (optional) service.
 #
 #   scripts/install.sh              # watch/sync node
 #   scripts/install.sh --mine       # also train and earn (needs a GPU + PyTorch)
@@ -10,11 +10,11 @@
 set -euo pipefail
 
 # --- live devnet parameters (see docs/joining.md) ---------------------------
-NETWORK="${PALIMPSEST_NETWORK:-devnet}"
-GENESIS_ID="${PALIMPSEST_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
-MODEL="${PALIMPSEST_MODEL:-small}"
-GENESIS_SEED="${PALIMPSEST_GENESIS_SEED:-1337}"
-INTERVAL="${PALIMPSEST_INTERVAL:-180}"
+NETWORK="${SESTRIAN_NETWORK:-devnet}"
+GENESIS_ID="${SESTRIAN_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
+MODEL="${SESTRIAN_MODEL:-small}"
+GENESIS_SEED="${SESTRIAN_GENESIS_SEED:-1337}"
+INTERVAL="${SESTRIAN_INTERVAL:-180}"
 
 MINE=0; SERVICE=0
 for arg in "$@"; do
@@ -27,7 +27,7 @@ for arg in "$@"; do
 done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOME_DIR="${PALIMPSEST_HOME:-$HOME/.palimpsest}"
+HOME_DIR="${SESTRIAN_HOME:-$HOME/.sestrian}"
 mkdir -p "$HOME_DIR"
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
@@ -51,17 +51,17 @@ fi
 
 say "build node"
 ( cd "$REPO/node" && cargo build --release )
-BIN="$REPO/node/target/release/palimpsest-node"
+BIN="$REPO/node/target/release/sestrian-node"
 
 say "identity"
 WALLET="$HOME_DIR/wallet.json"
 if [ -f "$WALLET" ]; then
   echo "using existing wallet $WALLET"
 else
-  # non-interactive-safe: PALIMPSEST_WALLET_PASSPHRASE encrypts it if you set
+  # non-interactive-safe: SESTRIAN_WALLET_PASSPHRASE encrypts it if you set
   # one, otherwise the file is plaintext (0600) — same as answering the prompt.
   ( cd "$REPO" && ${UV:-python3} -m client.wallet new --path "$WALLET" \
-      --passphrase-env PALIMPSEST_WALLET_PASSPHRASE )
+      --passphrase-env SESTRIAN_WALLET_PASSPHRASE )
   echo "BACK THIS FILE UP — it is your identity and your balance."
 fi
 
@@ -69,24 +69,24 @@ say "genesis"
 GEN="$HOME_DIR/genesis.bin"
 if [ -f "$GEN" ]; then
   echo "using existing $GEN"
-elif [ -n "${PALIMPSEST_GENESIS_URL:-}" ]; then
+elif [ -n "${SESTRIAN_GENESIS_URL:-}" ]; then
   # Convenience path: a prebuilt artifact (scripts/release-genesis.sh). Trust is
   # NOT implied — the node verifies the weights against the state_root compiled
   # into the binary, so a tampered download fails at startup.
-  echo "downloading prebuilt genesis: $PALIMPSEST_GENESIS_URL"
+  echo "downloading prebuilt genesis: $SESTRIAN_GENESIS_URL"
   TMP="$HOME_DIR/.genesis.download"
-  curl -fL --progress-bar "$PALIMPSEST_GENESIS_URL" -o "$TMP"
+  curl -fL --progress-bar "$SESTRIAN_GENESIS_URL" -o "$TMP"
   # verify the bytes AS DOWNLOADED (that is what the manifest publishes for the
   # artifact) — before spending time decompressing something tampered with
-  if [ -n "${PALIMPSEST_GENESIS_SHA256:-}" ]; then
+  if [ -n "${SESTRIAN_GENESIS_SHA256:-}" ]; then
     GOT=$(shasum -a 256 "$TMP" | awk '{print $1}')
-    [ "$GOT" = "$PALIMPSEST_GENESIS_SHA256" ] || {
+    [ "$GOT" = "$SESTRIAN_GENESIS_SHA256" ] || {
       echo "FATAL: downloaded artifact sha256 mismatch"
-      echo "  want $PALIMPSEST_GENESIS_SHA256"; echo "  got  $GOT"
+      echo "  want $SESTRIAN_GENESIS_SHA256"; echo "  got  $GOT"
       rm -f "$TMP"; exit 1; }
     echo "artifact sha256 verified."
   fi
-  case "$PALIMPSEST_GENESIS_URL" in
+  case "$SESTRIAN_GENESIS_URL" in
     *.zst) command -v zstd >/dev/null || { echo "need zstd to decompress"; exit 1; }
            zstd -d -q -f "$TMP" -o "$GEN"; rm -f "$TMP" ;;
     *)     mv "$TMP" "$GEN" ;;
@@ -94,7 +94,7 @@ elif [ -n "${PALIMPSEST_GENESIS_URL:-}" ]; then
   echo "(the node also verifies it against the network's baked-in state_root)"
 else
   [ -n "$UV" ] || { echo "need python+torch to generate the genesis, or set \
-PALIMPSEST_GENESIS_URL to a prebuilt artifact"; exit 1; }
+SESTRIAN_GENESIS_URL to a prebuilt artifact"; exit 1; }
   echo "reproducing it locally — deterministic, so this is trustless"
   ( cd "$REPO" && $UV -m client.make_genesis \
       --model "$MODEL" --seed "$GENESIS_SEED" --out "$GEN" ) | tee "$HOME_DIR/genesis.log"
@@ -110,7 +110,7 @@ fi
 # 'genesis' is the always-staked founding corpus — the correct starting point.
 # Once you stake your own (client.wallet submit-data), name its hash instead and
 # the data share flows to you.
-REFS="${PALIMPSEST_DATA_REFS:-genesis}"
+REFS="${SESTRIAN_DATA_REFS:-genesis}"
 
 say "preflight"
 # Consensus params (bootstrap peer, genesis id, genesis-ledger contributor) are
@@ -134,9 +134,9 @@ fi
 say "install service"
 case "$(uname -s)" in
   Linux)
-    sudo tee /etc/systemd/system/palimpsest-node.service >/dev/null <<UNIT
+    sudo tee /etc/systemd/system/sestrian-node.service >/dev/null <<UNIT
 [Unit]
-Description=Palimpsest node
+Description=Sestrian node
 After=network-online.target
 Wants=network-online.target
 [Service]
@@ -150,15 +150,15 @@ WorkingDirectory=$REPO
 WantedBy=multi-user.target
 UNIT
     sudo systemctl daemon-reload
-    sudo systemctl enable --now palimpsest-node
-    echo "installed: systemctl status palimpsest-node"
+    sudo systemctl enable --now sestrian-node
+    echo "installed: systemctl status sestrian-node"
     ;;
   Darwin)
-    PLIST="$HOME/Library/LaunchAgents/com.palimpsest.node.plist"
+    PLIST="$HOME/Library/LaunchAgents/com.sestrian.node.plist"
     { echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
       echo '<plist version="1.0"><dict>'
-      echo '  <key>Label</key><string>com.palimpsest.node</string>'
+      echo '  <key>Label</key><string>com.sestrian.node</string>'
       echo '  <key>ProgramArguments</key><array>'
       printf '    <string>%s</string>\n' "$BIN" "${ARGS[@]}"
       echo '  </array>'
@@ -168,9 +168,9 @@ UNIT
       echo "  <key>StandardErrorPath</key><string>$HOME_DIR/node.log</string>"
       echo '</dict></plist>'
     } > "$PLIST"
-    launchctl bootout "gui/$(id -u)/com.palimpsest.node" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.sestrian.node" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    echo "installed: launchctl list | grep palimpsest   (logs: $HOME_DIR/node.log)"
+    echo "installed: launchctl list | grep sestrian   (logs: $HOME_DIR/node.log)"
     ;;
   *) echo "unsupported OS for --service; run the command printed above manually" ;;
 esac

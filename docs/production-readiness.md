@@ -1,4 +1,4 @@
-# Palimpsest — Production Readiness
+# Sestrian — Production Readiness
 
 The go/no-go tracker for the phased launch. Phase 0 = the rig (done). Phase 1 =
 a small, **monitored open devnet** run by known operators (the network is

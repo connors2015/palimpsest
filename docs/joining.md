@@ -1,4 +1,4 @@
-# Joining the Palimpsest devnet
+# Joining the Sestrian devnet
 
 The network is **open** — permissionless, like Bitcoin. To join you need exactly
 three things, all public:
@@ -34,24 +34,24 @@ Running your own chain: `--network local`, and supply everything yourself.
 ## Run a node (watch + sync)
 
 ```bash
-# build (or pull ghcr.io/connors2015/palimpsest-node)
+# build (or pull ghcr.io/connors2015/sestrian-node)
 cd node && cargo build --release && cd ..
 
 # a wallet/identity key (0600); this is your on-chain identity
-head -c32 /dev/urandom | xxd -p -c64 > ~/.palimpsest.key && chmod 600 ~/.palimpsest.key
+head -c32 /dev/urandom | xxd -p -c64 > ~/.sestrian.key && chmod 600 ~/.sestrian.key
 
 # reproduce the genesis; it MUST print the published genesis id above
 uv run --with torch --with numpy --with pynacl \
     python -m client.make_genesis --model small --seed 1337 --out genesis.bin
 
 # PREFLIGHT — verify you can actually contribute before running for hours
-node/target/release/palimpsest-node --check \
-  --data-dir ~/.palimpsest --key-file ~/.palimpsest.key --genesis-file genesis.bin
+node/target/release/sestrian-node --check \
+  --data-dir ~/.sestrian --key-file ~/.sestrian.key --genesis-file genesis.bin
 
 # join and sync
-node/target/release/palimpsest-node \
-  --data-dir ~/.palimpsest \
-  --key-file ~/.palimpsest.key \
+node/target/release/sestrian-node \
+  --data-dir ~/.sestrian \
+  --key-file ~/.sestrian.key \
   --genesis-file genesis.bin \
   --api-port 8090
 ```
@@ -90,7 +90,7 @@ founding corpus, `--data-refs genesis`; once you stake your own corpus, name its
 data hash instead and the block data share pays *you*:
 
 ```bash
-target/release/palimpsest-node ... --produce --bridge-port 7999 --data-refs genesis
+target/release/sestrian-node ... --produce --bridge-port 7999 --data-refs genesis
 python -m client.miner_bridge --node-port 7999 --model <MODEL> --data <corpus.txt> --device cuda
 ```
 

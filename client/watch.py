@@ -250,7 +250,7 @@ async def _http(node: WatchNode, host, port):
 # --------------------------------------------------------------------------
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>palimpsest · chain watch</title>
+<title>sestrian · chain watch</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧠</text></svg>">
 <style>
 :root{--bg:#0a0d12;--s:#111721;--s2:#0d1219;--ink:#dbe4ee;--mut:#6d7f92;--line:#1d2836;
@@ -295,7 +295,7 @@ font-family:var(--mono);font-weight:700;cursor:pointer;font-size:13px}
 button:disabled{opacity:.5}
 .note{color:var(--mut);font-size:11.5px;margin-top:8px}
 </style></head><body><div class="wrap">
-<header><h1><span id="dot"></span><b>palimpsest</b> chain watch</h1><div id="mode">connecting…</div></header>
+<header><h1><span id="dot"></span><b>sestrian</b> chain watch</h1><div id="mode">connecting…</div></header>
 <div class="grid">
  <div class="stat"><div class="k">height</div><div class="v" id="height">–</div></div>
  <div class="stat"><div class="k">head</div><div class="v" id="head" style="font-size:14px">–</div></div>

@@ -30,7 +30,7 @@ def state_root(w_int: np.ndarray) -> str:
 
 def beacon(height: int, tag: str, salt: int = 0) -> np.random.Generator:
     """Unbiasable-randomness stand-in (§7.4): deterministic per (height, tag)."""
-    digest = hashlib.sha256(f"palimpsest|{height}|{tag}|{salt}".encode()).digest()
+    digest = hashlib.sha256(f"sestrian|{height}|{tag}|{salt}".encode()).digest()
     return np.random.default_rng(int.from_bytes(digest[:8], "big"))
 
 

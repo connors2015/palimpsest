@@ -143,7 +143,7 @@ async fn serve_one(
                                           "n": state.len(), "bin_next": true});
                         match write_frame(&mut wr, head.to_string().as_bytes()).await {
                             Ok(()) => write_frame(&mut wr,
-                                &palimpsest_core::int64_bytes(&state)).await,
+                                &sestrian_core::int64_bytes(&state)).await,
                             e => e,
                         }
                     }

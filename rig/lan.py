@@ -1,4 +1,4 @@
-"""Cross-machine Palimpsest node — coordinator + miners over a real network.
+"""Cross-machine Sestrian node — coordinator + miners over a real network.
 
 `rig/node.py` spawns miners as local subprocesses; this runs them as separate
 machines. The wire protocol (rig/protocol.py) was already TCP, so the only

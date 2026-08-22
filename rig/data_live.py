@@ -41,7 +41,7 @@ def _sim_thread():
 
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<title>Palimpsest — your data, earning</title><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Sestrian — your data, earning</title><meta name=viewport content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#0f1218;--surface:#161b24;--line:#232a35;--ink:#e7e9ee;--soft:#99a0ac;
 --gold:#dca85a;--teal:#62b9a6;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;}
@@ -139,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
 def main(host="127.0.0.1", port=8738):
     threading.Thread(target=_sim_thread, daemon=True).start()
     print("=" * 60)
-    print("  Palimpsest — 'watch your data earn' dashboard")
+    print("  Sestrian — 'watch your data earn' dashboard")
     print(f"  open  ->  http://{host}:{port}")
     print("  (Ctrl-C to stop)")
     print("=" * 60, flush=True)

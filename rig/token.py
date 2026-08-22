@@ -17,7 +17,7 @@ Reference implementation (the SPEC for the Rust node). Design commitments:
     §9.3 non-amendable cap. (Mainnet ties the sunset to revenue milestones;
     the reference uses heights so the schedule is testable today.)
 
-Units: integer "grains" (10^9 grains = 1 PALIMPSEST; no floats, ever).
+Units: integer "grains" (10^9 grains = 1 SESTRIAN; no floats, ever).
 """
 
 import hashlib

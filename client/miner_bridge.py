@@ -1,6 +1,6 @@
 """The PyTorch side of the trainer bridge — pure compute, zero consensus.
 
-Connects to a local palimpsest-node (Rust), receives the head state once, then
+Connects to a local sestrian-node (Rust), receives the head state once, then
 per training round: trains the real model for N inner steps on its own GPU and
 returns the COMPRESSED quantized pseudo-gradient. The node signs, gossips, and
 settles it; when the head advances the node sends a sparse state diff so this

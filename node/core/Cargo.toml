@@ -1,8 +1,8 @@
 [package]
-name = "palimpsest-core"
+name = "sestrian-core"
 version = "0.1.0"
 edition = "2021"
-description = "Deterministic consensus math for the Palimpsest node — must match the Python reference bit-exactly (see node/vectors/golden.json)"
+description = "Deterministic consensus math for the Sestrian node — must match the Python reference bit-exactly (see node/vectors/golden.json)"
 
 [dependencies]
 sha2 = "0.10"

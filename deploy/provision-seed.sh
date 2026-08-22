@@ -1,5 +1,5 @@
 #!/bin/bash
-# Provision a fresh Ubuntu 24.04 VPS into a Palimpsest public seed node
+# Provision a fresh Ubuntu 24.04 VPS into a Sestrian public seed node
 # (bootstrap peer + circuit-relay v2 + HTTP API), from zero, idempotently.
 #
 #   scp deploy/provision-seed.sh root@<ip>:/root/ && ssh root@<ip> 'bash provision-seed.sh'
@@ -10,20 +10,20 @@
 # public this step disappears (script falls back to https clone).
 #
 # What you get:
-#   * palimpsest-node (release build) under systemd, Restart=always
+#   * sestrian-node (release build) under systemd, Restart=always
 #   * --relay-server, public --external-address auto-detected
 #   * genesis.bin materialized in-place from the published seed and VERIFIED
 #   * ufw: 22/tcp, 9800/tcp+udp (gossip+relay), 8080/tcp (API)
 set -euo pipefail
 
-REPO_SSH="git@github.com:connors2015/palimpsest.git"
-REPO_HTTPS="https://github.com/connors2015/palimpsest.git"
+REPO_SSH="git@github.com:connors2015/sestrian.git"
+REPO_HTTPS="https://github.com/connors2015/sestrian.git"
 GENESIS_SEED=1337
 GENESIS_MODEL=small
 DATA_CONTRIBUTOR="3432d48fd6878b4f2e7a1e40cc15e112c512fae7"
 NODE_PORT=9800
 API_PORT=8080
-APP=/opt/palimpsest
+APP=/opt/sestrian
 
 echo "== packages =="
 export DEBIAN_FRONTEND=noninteractive
@@ -43,24 +43,24 @@ if [ ! -d $APP/.git ]; then
         git clone --depth 1 "$REPO_HTTPS" $APP        # repo is public
     else
         # private repo: machine deploy key
-        if [ ! -f /root/.ssh/palimpsest_deploy ]; then
-            ssh-keygen -t ed25519 -N "" -C "palimpsest-seed-$(hostname)" \
-                -f /root/.ssh/palimpsest_deploy -q
+        if [ ! -f /root/.ssh/sestrian_deploy ]; then
+            ssh-keygen -t ed25519 -N "" -C "sestrian-seed-$(hostname)" \
+                -f /root/.ssh/sestrian_deploy -q
         fi
         ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null
-        export GIT_SSH_COMMAND="ssh -i /root/.ssh/palimpsest_deploy"
+        export GIT_SSH_COMMAND="ssh -i /root/.ssh/sestrian_deploy"
         if ! git clone --depth 1 "$REPO_SSH" $APP 2>/dev/null; then
             echo ""
             echo "############################################################"
             echo "# Add this READ-ONLY deploy key to the GitHub repo, then   #"
             echo "# re-run this script:                                      #"
             echo "############################################################"
-            cat /root/.ssh/palimpsest_deploy.pub
+            cat /root/.ssh/sestrian_deploy.pub
             exit 1
         fi
     fi
 else
-    ( cd $APP && GIT_SSH_COMMAND="ssh -i /root/.ssh/palimpsest_deploy" git pull -q || true )
+    ( cd $APP && GIT_SSH_COMMAND="ssh -i /root/.ssh/sestrian_deploy" git pull -q || true )
 fi
 
 echo "== build node =="
@@ -85,14 +85,14 @@ PUBLIC_IP=$(curl -4s https://ifconfig.me || curl -4s https://api.ipify.org)
 echo "public ip: $PUBLIC_IP"
 
 echo "== systemd =="
-cat > /etc/systemd/system/palimpsest-seed.service <<EOF
+cat > /etc/systemd/system/sestrian-seed.service <<EOF
 [Unit]
-Description=Palimpsest seed node (bootstrap + relay)
+Description=Sestrian seed node (bootstrap + relay)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=$APP/node/target/release/palimpsest-node \\
+ExecStart=$APP/node/target/release/sestrian-node \\
   --data-dir $APP/data \\
   --key-file $APP/seed.key \\
   --genesis-file $APP/genesis.bin \\
@@ -110,7 +110,7 @@ WorkingDirectory=$APP
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now palimpsest-seed
+systemctl enable --now sestrian-seed
 
 echo "== firewall =="
 ufw allow 22/tcp >/dev/null
@@ -121,7 +121,7 @@ ufw --force enable >/dev/null
 
 sleep 4
 echo "== verify =="
-systemctl --no-pager -l status palimpsest-seed | head -6
+systemctl --no-pager -l status sestrian-seed | head -6
 curl -s -m 5 http://127.0.0.1:$API_PORT/status && echo
 echo ""
 echo "SEED LIVE. Bootstrap multiaddr for node operators:"

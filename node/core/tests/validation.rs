@@ -7,8 +7,8 @@
 //! `trimmed_mean` on every validator (remote chain-halt). The positive path is
 //! covered by the golden vectors; this file covers rejection.
 
-use palimpsest_core as core;
-use palimpsest_core::blocktree::{Block, BlockTree};
+use sestrian_core as core;
+use sestrian_core::blocktree::{Block, BlockTree};
 use std::collections::HashMap;
 
 const DIM: usize = 16;
@@ -126,7 +126,7 @@ fn rejects_wrong_length_delta_body() {
 
 // --- data-challenge market: quorum + disinterested jurors (task 93) ---------
 
-use palimpsest_core::token::{
+use sestrian_core::token::{
     address, AccountTx, DataChallengeTx, DataSubmitTx, DataVoteTx, TokenLedger,
 };
 use std::collections::HashSet;
@@ -192,7 +192,7 @@ fn owner_cannot_vote_on_challenge_of_own_entry() {
 
 #[test]
 fn challenge_below_quorum_is_rejected_and_refunds_owner() {
-    use palimpsest_core::token::CHALLENGE_QUORUM;
+    use sestrian_core::token::CHALLENGE_QUORUM;
     let (mut led, owner, challenger, jurors, data_id, challenge_id) = open_challenge();
     let owner_addr = address(&owner.pub_hex());
     let bal_before = led.balance(&owner_addr);
@@ -207,7 +207,7 @@ fn challenge_below_quorum_is_rejected_and_refunds_owner() {
     }
     let chal_addr = address(&challenger.pub_hex());
     let chal_before = led.balance(&chal_addr); // stake already escrowed out
-    led.resolve_expired_challenges(2 + palimpsest_core::token::CHALLENGE_WINDOW);
+    led.resolve_expired_challenges(2 + sestrian_core::token::CHALLENGE_WINDOW);
     // below quorum => NOT upheld: entry stays active, and the challenger's stake
     // is forfeited to the owner (lying/failed challenge costs).
     assert_eq!(led.registry[&data_id]["status"].as_str(), Some("active"),
@@ -221,7 +221,7 @@ fn challenge_below_quorum_is_rejected_and_refunds_owner() {
 
 // --- adversarial ledger cases (task 126) ------------------------------------
 
-use palimpsest_core::token::TransferTx;
+use sestrian_core::token::TransferTx;
 
 fn signed_transfer(from: &core::Key, to: &str, amount: u64, nonce: u64) -> TransferTx {
     let mut t = TransferTx {

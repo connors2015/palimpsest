@@ -46,7 +46,7 @@ def _chain_thread(n=5, t=3, interval=1.5):
 
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<title>Palimpsest — live chain</title><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Sestrian — live chain</title><meta name=viewport content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#0f1218;--surface:#161b24;--line:#232a35;--ink:#e7e9ee;--soft:#99a0ac;
 --gold:#dca85a;--teal:#62b9a6;--mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;}
@@ -73,7 +73,7 @@ tr:first-child td{animation:flash 1s ease}
 .h{color:var(--gold)} .rt{color:var(--soft)} .ok{color:var(--teal)}
 .bar{display:inline-block;height:7px;background:var(--teal);border-radius:4px;vertical-align:middle}
 </style></head><body><div class=wrap>
-<h1>Palimpsest — live chain</h1>
+<h1>Sestrian — live chain</h1>
 <div class=sub id=meta>connecting…</div>
 <div class=stats>
  <div class=stat><div class=k>height</div><div class="v gold" id=height>—</div></div>
@@ -182,7 +182,7 @@ def main(host="127.0.0.1", port=8737):
     threading.Thread(target=_chain_thread, daemon=True).start()
     srv = ThreadingHTTPServer((host, port), Handler)
     print("=" * 60)
-    print("  Palimpsest live chain viewer")
+    print("  Sestrian live chain viewer")
     print(f"  open  ->  http://{host}:{port}")
     print("  (Ctrl-C to stop)")
     print("=" * 60, flush=True)

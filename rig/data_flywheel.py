@@ -184,7 +184,7 @@ def run(seed=0, serve_rounds=40, queries_per_round=40, verbose=False):
 
 def main():
     print("=" * 70)
-    print("  PALIMPSEST — the data economy (bonus + downstream royalties)")
+    print("  SESTRIAN — the data economy (bonus + downstream royalties)")
     print("=" * 70)
     r = run(verbose=True)
     print(f"\nattribution: {r.attribution_acc*100:.0f}% of queries credit the right "
