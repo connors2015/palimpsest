@@ -92,6 +92,7 @@ def run(a):
             _send(sock, {"t": "hello"})
             state = None                            # int64 chain state (our copy)
             height = -1
+            step_secs = 0.0                         # measured per-inner-step cost
             while True:
                 msg = json.loads(_recv(sock))
                 t = msg.get("t")
@@ -116,16 +117,35 @@ def run(a):
                     if state is None or want_h != height:
                         _send(sock, {"t": "resync"})
                         continue
+                    # AUTO-FIT (the slow-GPU fix): a delta is includable only at
+                    # base_height == head, so a round that overruns the block
+                    # interval is dropped as stale and earns NOTHING. Fit the
+                    # inner steps to the node's budget using the measured
+                    # per-step cost, so any GPU contributes something every
+                    # round instead of everything-or-nothing.
+                    steps = a.inner
+                    budget = float(msg.get("budget_s", 0) or 0)
+                    if budget > 0 and step_secs > 0:
+                        steps = int(max(1, min(a.inner, budget / step_secs)))
+                        if steps < a.inner:
+                            print(f"auto-fit: {steps}/{a.inner} inner steps to "
+                                  f"fit {budget:.0f}s budget "
+                                  f"({step_secs*1000:.0f}ms/step)", flush=True)
+                    t_start = time.time()
                     delta_int, loss = miner.inner_train(
-                        a.inner, a.batch, seed=int(msg.get("seed", 0)))
+                        steps, a.batch, seed=int(msg.get("seed", 0)))
+                    elapsed = time.time() - t_start
+                    # EMA of per-step cost (first measurement seeds it outright)
+                    obs = elapsed / max(1, steps)
+                    step_secs = obs if step_secs <= 0 else 0.7 * step_secs + 0.3 * obs
                     payload = comp.compress(dequantize(delta_int))
                     # inner_train mutated the model; restore chain state so the
                     # next round trains from the agreed head, not our drift
                     set_flat_params(model, dequantize(state))
                     _send(sock, {"t": "delta", "height": want_h, "loss": loss,
                                  "payload": _payload_json(payload)})
-                    print(f"h{want_h}: trained {a.inner}x{a.batch}, "
-                          f"loss {loss:.3f}", flush=True)
+                    print(f"h{want_h}: trained {steps}x{a.batch} in "
+                          f"{elapsed:.0f}s, loss {loss:.3f}", flush=True)
                 elif t == "eval":
                     # rev 7 DELTA SCORING: measure each candidate delta's loss
                     # improvement on a HELD-OUT batch (val split, seeded from the

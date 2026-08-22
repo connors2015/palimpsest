@@ -350,6 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peers_connected: 0,
         chat_pending: Vec::new(),
         chat_inflight: false,
+        stale_deltas: 0,
     };
     node::run(n, swarm, api_rx, bridge_ev_rx).await;
     Ok(())

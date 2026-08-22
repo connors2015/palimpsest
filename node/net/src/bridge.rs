@@ -22,7 +22,10 @@ use tracing::{info, warn};
 #[derive(Debug)]
 pub enum ToBridge {
     State { height: u64, state: Vec<i64> },
-    Train { height: u64, seed: u64 },
+    /// `budget_s`: how long the trainer may spend before its delta goes stale
+    /// (derived from the node's block interval) — the trainer auto-fits its
+    /// inner steps to it, so a slow GPU still lands includable deltas.
+    Train { height: u64, seed: u64, budget_s: f64 },
     Advance { height: u64, sparse: SparseI64 },
     Generate { prompt: String, n: u64 },
     /// rev 7: score candidate deltas on a held-out batch (seeded from block
@@ -144,8 +147,9 @@ async fn serve_one(
                             e => e,
                         }
                     }
-                    ToBridge::Train { height, seed } => {
-                        let m = json!({"t": "train", "height": height, "seed": seed});
+                    ToBridge::Train { height, seed, budget_s } => {
+                        let m = json!({"t": "train", "height": height, "seed": seed,
+                                       "budget_s": budget_s});
                         write_frame(&mut wr, m.to_string().as_bytes()).await
                     }
                     ToBridge::Advance { height, sparse } => {

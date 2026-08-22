@@ -325,6 +325,9 @@ pub struct Node {
     pub peers_connected: usize,
     pub chat_pending: Vec<tokio::sync::oneshot::Sender<Value>>,
     pub chat_inflight: bool,
+    /// consecutive deltas dropped as stale — a slow trainer mining for nothing.
+    /// Surfaced in /status + /metrics so the failure is visible, not silent.
+    pub stale_deltas: u64,
 }
 
 impl Node {
@@ -919,6 +922,9 @@ impl Node {
             "miner": self.key.pub_hex(),
             "peers": self.peers_connected,
             "model_attached": self.bridge_synced,
+            // >0 means this node is training but its deltas keep missing the
+            // block window — mining for nothing. Visible, not silent.
+            "stale_deltas": self.stale_deltas,
         })
     }
 
@@ -941,6 +947,9 @@ impl Node {
             g("1 if this node produces blocks", "producer", self.cfg.produce as u64),
             g("1 if a training bridge is attached", "model_attached",
               self.bridge_synced as u64),
+            g("consecutive deltas dropped as stale (trainer slower than the \
+               block interval — alert on this: the miner earns nothing)",
+              "stale_deltas", self.stale_deltas),
             g("1 if a training round is in flight", "train_inflight",
               self.train_inflight as u64),
             g("pool deltas scored by our trainer", "scored_deltas",
@@ -1134,6 +1143,11 @@ pub async fn run(
                         let _ = node.bridge_tx.try_send(ToBridge::Train {
                             height: node.head_height(),
                             seed: round as u64,
+                            // spend at most ~60% of the round on inner steps:
+                            // the rest covers compression, scoring/sketching and
+                            // gossip, so the delta lands while it's still
+                            // includable rather than arriving stale.
+                            budget_s: node.cfg.interval * 0.6,
                         });
                     }
                     let my_turn = match node.cfg.rotate {
@@ -1222,8 +1236,23 @@ pub async fn run(
                 FromBridge::Delta { height, loss, payload } => {
                     node.train_inflight = false;
                     if height != node.head_height() {
-                        debug!("stale delta (h{height} vs h{})", node.head_height());
+                        // A delta is includable only at base_height == head, so a
+                        // trainer slower than the block interval produces deltas
+                        // that are ALWAYS stale — it mines forever and earns
+                        // nothing. This used to be debug!, i.e. an invisible
+                        // failure: the operator saw "trained, loss …" and no
+                        // rewards, with no explanation. Say it loudly, and say
+                        // what to do about it.
+                        node.stale_deltas += 1;
+                        warn!(trained_at = height, head = node.head_height(),
+                              consecutive = node.stale_deltas,
+                              "DELTA DROPPED (stale): your training round finished \
+                               after the head moved on, so it cannot be included \
+                               and earns nothing. Your GPU is slower than the \
+                               block interval — lower --inner/--batch on the \
+                               trainer (or raise the node's --interval).");
                     } else {
+                        node.stale_deltas = 0;
                         let dense = payload.dense().unwrap_or_default();
                         let dh = core::delta_hash(&core::int64_bytes(&dense));
                         let mut tx = core::BackpropTx {
