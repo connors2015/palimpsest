@@ -53,12 +53,12 @@ uv run --with torch --with numpy --with pynacl \
 # check you can actually contribute BEFORE committing hours to it
 node/target/release/palimpsest-node --check --data-dir ~/.palimpsest \
   --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin \
-  --peers /ip4/169.58.211.248/tcp/9800
+  --peers /ip4/169.58.211.248/tcp/9800 --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
 
 # then run it
 node/target/release/palimpsest-node --data-dir ~/.palimpsest \
   --wallet ~/.palimpsest/wallet.json --genesis-file genesis.bin \
-  --peers /ip4/169.58.211.248/tcp/9800
+  --peers /ip4/169.58.211.248/tcp/9800 --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
 ```
 
 Those are the **live devnet** values; the current list is always in

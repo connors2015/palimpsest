@@ -25,6 +25,7 @@ import getpass
 import json
 import os
 import stat
+import sys
 import urllib.request
 
 from rig.crypto import Key
@@ -99,13 +100,26 @@ def _mnemonic_for(sk: bytes) -> str | None:
         return None
 
 
-def create(path: str) -> dict:
+def create(path: str, passphrase_env: str | None = None) -> dict:
     if os.path.exists(path):
         raise SystemExit(f"refusing to overwrite existing wallet: {path}")
     key = Key.generate()                          # 32 random bytes from os.urandom
-    pw = getpass.getpass("passphrase for the wallet file (empty = unencrypted): ")
-    if pw and pw != getpass.getpass("repeat passphrase: "):
-        raise SystemExit("passphrases do not match")
+    if passphrase_env is not None:
+        # non-interactive path (installer, CI, provisioning): take the passphrase
+        # from an env var so nothing lands in argv/ps. Unset or empty = plaintext.
+        pw = os.environ.get(passphrase_env, "")
+    elif not sys.stdin.isatty():
+        # getpass would raise a bare EOFError here — useless to an operator
+        raise SystemExit(
+            "wallet new needs a terminal to prompt for a passphrase.\n"
+            "Non-interactive? Use --passphrase-env VAR (unset/empty = "
+            "unencrypted), e.g.:\n"
+            "  PALIMPSEST_WALLET_PASSPHRASE=... python -m client.wallet new "
+            "--passphrase-env PALIMPSEST_WALLET_PASSPHRASE")
+    else:
+        pw = getpass.getpass("passphrase for the wallet file (empty = unencrypted): ")
+        if pw and pw != getpass.getpass("repeat passphrase: "):
+            raise SystemExit("passphrases do not match")
     rec = _write_wallet(path, key, pw)
     words = _mnemonic_for(key.sk)
     if words:
@@ -162,6 +176,37 @@ def _post(node: str, route: str, payload: dict):
         return json.loads(r.read())
 
 
+def _submit(node: str, addr: str, route: str, build, tries: int = 3,
+            wait_s: int = 240):
+    """Submit a nonce-ordered tx and CONFIRM it landed, retrying on a nonce race.
+
+    Every account tx is ordered by the sender's nonce, so two machines sharing a
+    wallet (or a resubmit after a chain reset) will pick the same nonce and one
+    of them is silently discarded — the CLI would print 'in mempool' and the tx
+    would never apply. Poll until the nonce actually advances; if it doesn't,
+    rebuild against the current nonce and resend.
+
+    `build(nonce) -> (tx, payload)`. Returns the node's reply once confirmed.
+    """
+    import time
+    for attempt in range(1, tries + 1):
+        info = _get(node, f"/balance?addr={addr}")
+        nonce = info.get("nonce", 0)
+        tx, payload = build(nonce)
+        out = _post(node, route, payload)
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            time.sleep(5)
+            if _get(node, f"/balance?addr={addr}").get("nonce", 0) > nonce:
+                return out                       # nonce advanced ⇒ ours applied
+        if attempt < tries:
+            print(f"  not confirmed in {wait_s}s (nonce still {nonce}) — likely a "
+                  f"nonce race; rebuilding and resending [{attempt}/{tries}]")
+    raise SystemExit(
+        f"tx never confirmed after {tries} attempts. If another machine shares "
+        f"this wallet, submit from only one at a time.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["new", "restore", "show", "balance", "send",
@@ -177,10 +222,13 @@ def main():
     ap.add_argument("--reason", default="validity")         # validity | ownership
     ap.add_argument("--challenge-id", default=None)         # vote target
     ap.add_argument("--support", action="store_true")       # vote: uphold challenge
+    ap.add_argument("--passphrase-env", default=None,
+                    help="non-interactive `new`: read the wallet passphrase from "
+                         "this env var (unset/empty = unencrypted)")
     a = ap.parse_args()
 
     if a.cmd == "new":
-        rec = create(a.path)
+        rec = create(a.path, a.passphrase_env)
         print(f"wallet created: {a.path}  (mode 0600 — BACK THIS FILE UP)")
         print(f"address: {to_display(rec['address'])}  (hex {rec['address']})")
         print(f"pubkey:  {rec['pub']}")
@@ -201,14 +249,15 @@ def main():
     elif a.cmd == "send":
         if not a.to or a.amount is None:
             raise SystemExit("send needs --to and --amount")
-        info = _get(a.node, f"/balance?addr={rec['address']}")
-        tx = TransferTx(from_pub=rec["pub"], to_addr=parse_addr(a.to),
-                        amount=int(round(a.amount * GRAIN)),
-                        nonce=info.get("nonce", 0)).signed(key)
-        out = _post(a.node, "/transfer", {
-            "from_pub": tx.from_pub, "to_addr": tx.to_addr,
-            "amount": tx.amount, "nonce": tx.nonce, "sig": tx.sig.hex()})
-        print(f"submitted {a.amount} to {a.to}: {out}")
+        def _build(nonce):
+            tx = TransferTx(from_pub=rec["pub"], to_addr=parse_addr(a.to),
+                            amount=int(round(a.amount * GRAIN)),
+                            nonce=nonce).signed(key)
+            return tx, {"from_pub": tx.from_pub, "to_addr": tx.to_addr,
+                        "amount": tx.amount, "nonce": tx.nonce,
+                        "sig": tx.sig.hex()}
+        out = _submit(a.node, rec["address"], "/transfer", _build)
+        print(f"CONFIRMED: sent {a.amount} to {a.to}: {out}")
     elif a.cmd == "submit-data":
         if not a.file or a.stake is None:
             raise SystemExit("submit-data needs --file and --stake")
@@ -223,18 +272,19 @@ def main():
             while chunk := f.read(1 << 24):
                 h.update(chunk)
                 size += len(chunk)
-        info = _get(a.node, f"/balance?addr={rec['address']}")
-        tx = DataSubmitTx(owner_pub=rec["pub"],
-                          data_hash=h.hexdigest(),
-                          size_bytes=size, media_type=a.media_type,
-                          stake=int(round(a.stake * GRAIN)),
-                          nonce=info.get("nonce", 0)).signed(key)
-        out = _post(a.node, "/data/submit", {
-            "owner_pub": tx.owner_pub, "data_hash": tx.data_hash,
-            "size_bytes": tx.size_bytes, "media_type": tx.media_type,
-            "stake": tx.stake, "nonce": tx.nonce, "sig": tx.sig.hex()})
-        print(f"data submitted ({size} bytes, hash {tx.data_hash[:16]}…, "
+        def _build(nonce):
+            tx = DataSubmitTx(owner_pub=rec["pub"], data_hash=h.hexdigest(),
+                              size_bytes=size, media_type=a.media_type,
+                              stake=int(round(a.stake * GRAIN)),
+                              nonce=nonce).signed(key)
+            return tx, {"owner_pub": tx.owner_pub, "data_hash": tx.data_hash,
+                        "size_bytes": tx.size_bytes, "media_type": tx.media_type,
+                        "stake": tx.stake, "nonce": tx.nonce,
+                        "sig": tx.sig.hex()}
+        out = _submit(a.node, rec["address"], "/data/submit", _build)
+        print(f"CONFIRMED: data staked ({size} bytes, hash {h.hexdigest()[:16]}…, "
               f"stake {a.stake}): {out}")
+        print(f"  now mine with:  --data-refs {h.hexdigest()}")
     elif a.cmd == "challenge":
         if not a.data_id or a.stake is None:
             raise SystemExit("challenge needs --data-id and --stake")

@@ -284,6 +284,27 @@ async fn preflight(args: &Args, key: &core::Key, store: &store::Store,
         fails += 1;
     }
 
+    // 3b. --data-contributor is a GENESIS PARAMETER, not a preference: it seeds
+    //     the founding corpus into the genesis ledger. Every node on a network
+    //     must pass the identical value or its ledger diverges from block 1 and
+    //     NOTHING will ever validate — the node sits at height 0 forever,
+    //     receiving blocks and silently discarding them. (Observed exactly that
+    //     while testing the join flow.)
+    if !args.peers.is_empty() {
+        if args.data_contributor.is_empty() {
+            println!("  \x1b[31mFAIL\x1b[0m  joining a network without \
+                      --data-contributor: it is a GENESIS parameter.");
+            println!("        Without the network's exact value your genesis \
+                      ledger differs, every block fails");
+            println!("        validation, and you stay at height 0 forever. See \
+                      docs/joining.md for the value.");
+            fails += 1;
+        } else {
+            pass(format!("genesis ledger parameter set — data-contributor {}",
+                         &args.data_contributor[..12.min(args.data_contributor.len())]));
+        }
+    }
+
     // 4. the mining-viability check — the silent killer. A delta is includable
     //    only at base_height == head, so a round slower than the block interval
     //    is ALWAYS dropped. We can't time the GPU from here (that's the

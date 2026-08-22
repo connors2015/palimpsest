@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Palimpsest one-command setup: build, wallet, genesis, preflight, (optional) service.
+#
+#   scripts/install.sh              # watch/sync node
+#   scripts/install.sh --mine       # also train and earn (needs a GPU + PyTorch)
+#   scripts/install.sh --service    # install systemd/launchd so it survives reboots
+#
+# Everything it does is what docs/joining.md documents by hand — this just does it
+# in order, and refuses to leave you in a state where you'd silently earn nothing.
+set -euo pipefail
+
+# --- live devnet parameters (see docs/joining.md) ---------------------------
+PEER="${PALIMPSEST_PEER:-/ip4/169.58.211.248/tcp/9800}"
+GENESIS_ID="${PALIMPSEST_GENESIS_ID:-30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28}"
+MODEL="${PALIMPSEST_MODEL:-small}"
+GENESIS_SEED="${PALIMPSEST_GENESIS_SEED:-1337}"
+INTERVAL="${PALIMPSEST_INTERVAL:-180}"
+# GENESIS PARAMETER: seeds the founding corpus into the genesis ledger. Must be
+# byte-identical on every node of the network or nothing validates.
+DATA_CONTRIBUTOR="${PALIMPSEST_DATA_CONTRIBUTOR:-3432d48fd6878b4f2e7a1e40cc15e112c512fae7}"
+
+MINE=0; SERVICE=0
+for arg in "$@"; do
+  case "$arg" in
+    --mine) MINE=1 ;;
+    --service) SERVICE=1 ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    *) echo "unknown option: $arg (try --help)"; exit 2 ;;
+  esac
+done
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOME_DIR="${PALIMPSEST_HOME:-$HOME/.palimpsest}"
+mkdir -p "$HOME_DIR"
+say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
+
+say "toolchain"
+command -v cargo >/dev/null || {
+  echo "installing rust…"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+}
+# RUN is a python interpreter invocation: "$RUN -m client.x" must always work.
+UV=""
+if command -v uv >/dev/null; then
+  UV="uv run --python 3.11 --with torch --with numpy --with pynacl python"
+elif python3 -c "import torch,numpy,nacl" 2>/dev/null; then UV="python3"
+else
+  echo "note: no uv and no torch — install uv (https://astral.sh/uv) or torch+numpy+pynacl."
+  echo "      needed to generate the genesis and to mine."
+  [ "$MINE" = 1 ] && { echo "cannot --mine without them"; exit 1; }
+fi
+
+say "build node"
+( cd "$REPO/node" && cargo build --release )
+BIN="$REPO/node/target/release/palimpsest-node"
+
+say "identity"
+WALLET="$HOME_DIR/wallet.json"
+if [ -f "$WALLET" ]; then
+  echo "using existing wallet $WALLET"
+else
+  # non-interactive-safe: PALIMPSEST_WALLET_PASSPHRASE encrypts it if you set
+  # one, otherwise the file is plaintext (0600) — same as answering the prompt.
+  ( cd "$REPO" && ${UV:-python3} -m client.wallet new --path "$WALLET" \
+      --passphrase-env PALIMPSEST_WALLET_PASSPHRASE )
+  echo "BACK THIS FILE UP — it is your identity and your balance."
+fi
+
+say "genesis (reproduced locally — deterministic, so this is trustless)"
+GEN="$HOME_DIR/genesis.bin"
+if [ -f "$GEN" ]; then
+  echo "using existing $GEN"
+else
+  [ -n "$UV" ] || { echo "need python+torch to generate the genesis"; exit 1; }
+  ( cd "$REPO" && $UV -m client.make_genesis \
+      --model "$MODEL" --seed "$GENESIS_SEED" --out "$GEN" ) | tee "$HOME_DIR/genesis.log"
+  if ! grep -q "$GENESIS_ID" "$HOME_DIR/genesis.log"; then
+    echo "FATAL: generated genesis does NOT match the published id $GENESIS_ID"
+    echo "       you would be on a different chain — not continuing."
+    exit 1
+  fi
+  echo "verified against the published genesis id."
+fi
+
+# --data-refs: provenance is required, so a miner must name a staked corpus.
+# 'genesis' is the always-staked founding corpus — the correct starting point.
+# Once you stake your own (client.wallet submit-data), name its hash instead and
+# the data share flows to you.
+REFS="${PALIMPSEST_DATA_REFS:-genesis}"
+
+say "preflight"
+ARGS=(--data-dir "$HOME_DIR/nodedata" --wallet "$WALLET" --genesis-file "$GEN"
+      --peers "$PEER" --api-port 8090 --data-contributor "$DATA_CONTRIBUTOR")
+[ "$MINE" = 1 ] && ARGS+=(--produce --interval "$INTERVAL" --data-refs "$REFS")
+"$BIN" --check "${ARGS[@]}" || { echo "preflight failed — fix the above first."; exit 1; }
+
+if [ "$SERVICE" = 0 ]; then
+  say "ready — run it"
+  echo "  $BIN ${ARGS[*]}"
+  [ "$MINE" = 1 ] && echo "  # and in another shell, the trainer:
+  cd $REPO && $UV -m client.miner_bridge --node-port 7999 \\
+      --model $MODEL --data <your-corpus.txt> --device <cuda|mps>"
+  echo
+  echo "  watch:  curl -s localhost:8090/status   (stale_deltas must stay 0)"
+  exit 0
+fi
+
+say "install service"
+case "$(uname -s)" in
+  Linux)
+    sudo tee /etc/systemd/system/palimpsest-node.service >/dev/null <<UNIT
+[Unit]
+Description=Palimpsest node
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=$USER
+ExecStart=$BIN ${ARGS[*]}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+WorkingDirectory=$REPO
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now palimpsest-node
+    echo "installed: systemctl status palimpsest-node"
+    ;;
+  Darwin)
+    PLIST="$HOME/Library/LaunchAgents/com.palimpsest.node.plist"
+    { echo '<?xml version="1.0" encoding="UTF-8"?>'
+      echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+      echo '<plist version="1.0"><dict>'
+      echo '  <key>Label</key><string>com.palimpsest.node</string>'
+      echo '  <key>ProgramArguments</key><array>'
+      printf '    <string>%s</string>\n' "$BIN" "${ARGS[@]}"
+      echo '  </array>'
+      echo "  <key>WorkingDirectory</key><string>$REPO</string>"
+      echo '  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>'
+      echo "  <key>StandardOutPath</key><string>$HOME_DIR/node.log</string>"
+      echo "  <key>StandardErrorPath</key><string>$HOME_DIR/node.log</string>"
+      echo '</dict></plist>'
+    } > "$PLIST"
+    launchctl bootout "gui/$(id -u)/com.palimpsest.node" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    echo "installed: launchctl list | grep palimpsest   (logs: $HOME_DIR/node.log)"
+    ;;
+  *) echo "unsupported OS for --service; run the command printed above manually" ;;
+esac

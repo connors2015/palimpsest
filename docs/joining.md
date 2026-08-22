@@ -20,7 +20,14 @@ anyway (a peer will refuse to serve it; that is expected, not a fault).
 > | bootstrap peer | `/ip4/169.58.211.248/tcp/9800` |
 > | genesis id | `30ea20da27f1da0c94512d50a6291370a63a426b77dc425b9826ca17bd213c28` |
 > | model | 85.4M-param GPT, from-scratch genesis (seed 1337) |
+> | **data-contributor** | `3432d48fd6878b4f2e7a1e40cc15e112c512fae7` |
 > | public API | `http://169.58.211.248:8080/status` |
+
+**`--data-contributor` is a genesis parameter, not a preference.** It seeds the
+founding corpus into the genesis ledger, so every node must pass the identical
+value. Omit it and your ledger differs from block 1: you will connect, receive
+blocks, silently discard all of them, and sit at height 0 forever. `--check`
+fails loudly if it is missing.
 
 ## Run a node (watch + sync)
 
@@ -38,7 +45,8 @@ uv run --with torch --with numpy --with pynacl \
 # PREFLIGHT — verify you can actually contribute before running for hours
 node/target/release/palimpsest-node --check \
   --data-dir ~/.palimpsest --key-file ~/.palimpsest.key \
-  --genesis-file genesis.bin --peers /ip4/169.58.211.248/tcp/9800
+  --genesis-file genesis.bin --peers /ip4/169.58.211.248/tcp/9800 \
+  --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7
 
 # join and sync
 node/target/release/palimpsest-node \
@@ -46,6 +54,7 @@ node/target/release/palimpsest-node \
   --key-file ~/.palimpsest.key \
   --genesis-file genesis.bin \
   --peers /ip4/169.58.211.248/tcp/9800 \
+  --data-contributor 3432d48fd6878b4f2e7a1e40cc15e112c512fae7 \
   --api-port 8090
 ```
 
